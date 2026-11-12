@@ -128,7 +128,8 @@ def main() -> int:
     else:
         cmd = [
             compiler, "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra",
-            "-pthread", "-o", str(OUT), str(SRC),
+            # 静态链 libstdc++：QQ 是 Electron，不保证系统里那份 libstdc++ 版本够新
+            "-static-libstdc++", "-static-libgcc", "-pthread", "-o", str(OUT), str(SRC),
         ]
         cmd += ["-g", "-O0"] if args.debug else ["-O2"]
 
