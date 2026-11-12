@@ -149,6 +149,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature("webui", "0.8.0", "WebUI 控制台（serve webui）"),
     Feature("x11", "0.9.0", "无头 Linux 发送（Xvfb + xdotool，不抢焦点）"),
     Feature("env", "0.10.0", "内置虚拟环境（arklink env：建/启/停/推/删）"),
+    Feature("standalone", "0.11.0", "自助使用：policy.json + arklink peers + arklink start + 双击启动"),
 )
 
 _FEATURE_BY_KEY = {f.key: f for f in FEATURES}

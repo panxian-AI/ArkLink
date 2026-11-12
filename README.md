@@ -46,10 +46,25 @@ ArkBot 的**协议外挂层**。四个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
-pytest tests -q                   # 181 项测试（Linux 上另有 8 项平台测试）
+pytest tests -q                   # 283 项测试（Linux 上另有 9 项平台测试）
 python -m arklink version         # 当前版本 + 新版本检测
 python -m arklink doctor          # 迁移体检：环境/模块/进程/管道/服务端/配置
 ```
+
+### 自己用：双击就开，不用记住任何参数
+
+不想碰命令行也行。仓库根目录的 `start.bat`（Windows）或 `start.sh`（Linux/macOS）
+**双击即用**：第一次自动建 `.venv`、装依赖，之后直接起控制台并打开浏览器。
+
+```bash
+arklink start                      # 等价于双击；默认 http://127.0.0.1:6800/
+arklink peers                      # 看白名单（谁在允许范围里）
+arklink peers allow 505 --group    # 自己加人/加群，改完立刻生效
+```
+
+白名单落在 `~/.arklink/policy.json`，**不用改代码、不用重装**。群聊默认关闭，
+要发给群必须显式 `--group` 打开一次。完整自助手册（含开机自启、手机访问、
+出错排查表）见 [docs/自己用.md](docs/自己用.md)。
 
 ### 接一个 Milky 协议端
 
@@ -303,6 +318,7 @@ tests/
 | [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑、**各形态磁盘/内存账单** |
 | [docs/Windows会话隔离.md](docs/Windows会话隔离.md) | 「另开一个桌面」四种做法哪个能行：虚拟桌面/CreateDesktop/独立窗口站/独立会话，及 CDP 备选 |
 | [docs/内置虚拟环境.md](docs/内置虚拟环境.md) | `arklink env` 四条命令、无人值守装机的每个参数、资源账单、常见卡点 |
+| [docs/自己用.md](docs/自己用.md) | **给使用者**：双击启动、三分钟跑起来、白名单自助修改、505 群三步示例、排查表 |
 
 ## 合规与安全
 

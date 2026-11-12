@@ -112,6 +112,56 @@ def save_peers(peers: Iterable[Peer], path: str | os.PathLike[str] | None = None
     return target
 
 
+#: 策略文件里认这几个键，其余一律忽略（避免手改出花样把闸门搞失效）
+POLICY_KEYS: tuple[str, ...] = (
+    "allowed_uins",
+    "allowed_peers",
+    "allow_group",
+    "allowed_groups",
+    "max_length",
+)
+
+
+def policy_path() -> Path:
+    """`~/.arklink/policy.json`：白名单的落盘位置。
+
+    存在的意义是「脱离开发者也能改」：不用改 Python、不用重装，
+    `arklink peers allow 505 --group` 写这个文件，下次启动就生效。
+    环境变量 `ARKLINK_POLICY` 可整体换一份（测试和「多套配置」都用它）。
+    """
+    override = os.environ.get("ARKLINK_POLICY")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".arklink" / "policy.json"
+
+
+def load_policy_file(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    target = Path(path).expanduser() if path else policy_path()
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    # 只认已知键；写错键名时宁可不生效，也不要让一个拼写错误变成「放开所有人」
+    return {key: raw[key] for key in POLICY_KEYS if key in raw}
+
+
+def save_policy_file(
+    data: dict[str, Any], path: str | os.PathLike[str] | None = None
+) -> Path:
+    target = Path(path).expanduser() if path else policy_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"version": 1}
+    payload.update({key: data[key] for key in POLICY_KEYS if key in data})
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:  # 只有本人可读：白名单本身不敏感，但没必要让别人改
+        target.chmod(0o600)
+    except OSError:
+        pass
+    return target
+
+
 @dataclass
 class SendPolicy:
     """发送白名单。默认值就是用户定下的那条：1000000001 → 示例好友。"""
@@ -126,19 +176,81 @@ class SendPolicy:
     # ---------------- 构造 ----------------
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None = None, *, load: bool = True) -> "SendPolicy":
-        cfg = dict(cfg or {})
-        uins = cfg.get("allowed_uins", DEFAULT_UINS)
-        names = cfg.get("allowed_peers", DEFAULT_PEERS)
+        """默认值 → `policy.json` → 调用方传入的 cfg（越靠后优先级越高）。
+
+        三层是刻意的：代码里的默认值就是产品的安全底线（1000000001 → 示例好友、群聊关闭），
+        文件层让用户能自己加人，cfg 层留给测试和一次性覆盖。
+        """
+        merged: dict[str, Any] = load_policy_file() if load else {}
+        for key, value in dict(cfg or {}).items():
+            if value is not None:
+                merged[key] = value
         policy = cls(
-            allowed_uins=_as_tuple(uins),
-            allowed_peers=_as_tuple(names),
-            allow_group=bool(cfg.get("allow_group", False)),
-            allowed_groups=_as_tuple(cfg.get("allowed_groups", ())),
-            max_length=int(cfg.get("max_length", 3000)),
+            allowed_uins=_as_tuple(merged.get("allowed_uins", DEFAULT_UINS)),
+            allowed_peers=_as_tuple(merged.get("allowed_peers", DEFAULT_PEERS)),
+            allow_group=bool(merged.get("allow_group", False)),
+            allowed_groups=_as_tuple(merged.get("allowed_groups", ())),
+            max_length=int(merged.get("max_length", 3000)),
         )
         if load:
-            policy.peers = load_peers(cfg.get("peers_file"))
+            policy.peers = load_peers(merged.get("peers_file"))
         return policy
+
+    # ---------------- 落盘 ----------------
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed_uins": list(self.allowed_uins),
+            "allowed_peers": list(self.allowed_peers),
+            "allow_group": self.allow_group,
+            "allowed_groups": list(self.allowed_groups),
+            "max_length": self.max_length,
+        }
+
+    def save(self, path: str | os.PathLike[str] | None = None) -> Path:
+        return save_policy_file(self.to_dict(), path)
+
+    # ---------------- 改白名单 ----------------
+    def allow(self, *names: str, group: bool = False) -> list[str]:
+        """加进收件人白名单，返回真正新增的那几个（重复加不算）。"""
+        added: list[str] = []
+        for raw in names:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            if name not in self.allowed_peers:
+                self.allowed_peers = (*self.allowed_peers, name)
+                added.append(name)
+            if group:
+                self.allow_group = True
+                if name not in self.allowed_groups:
+                    self.allowed_groups = (*self.allowed_groups, name)
+        return added
+
+    def deny(self, *names: str) -> list[str]:
+        """从白名单里删掉，返回真正删掉的那几个。"""
+        removed: list[str] = []
+        for raw in names:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            if name in self.allowed_peers:
+                self.allowed_peers = tuple(x for x in self.allowed_peers if x != name)
+                removed.append(name)
+            if name in self.allowed_groups:
+                self.allowed_groups = tuple(x for x in self.allowed_groups if x != name)
+        if not self.allowed_groups:
+            self.allow_group = False
+        return removed
+
+    def reset(self) -> None:
+        """恢复产品默认边界，同时把策略文件删掉（下次读到的就是默认值）。"""
+        self.allowed_uins = DEFAULT_UINS
+        self.allowed_peers = DEFAULT_PEERS
+        self.allow_group = False
+        self.allowed_groups = ()
+        target = policy_path()
+        if target.exists():
+            target.unlink()
 
     # ---------------- 判定 ----------------
     def check_account(self, uin: str | int) -> Decision:
@@ -172,11 +284,14 @@ class SendPolicy:
             # 否则「只发给示例好友」这条要求会被一个不存在的 peers.json 卡住，
             # 而 UI 通道本来就只需要一个能在搜索框里打出来的名字。
             if text in self.allowed_peers and text not in ("", "*"):
-                return self._check_peer(Peer(chat_type=1, peer_uid=text, name=text))
+                # 名字同时出现在群白名单里，就按群会话处理；否则按私聊。
+                # 这一点对协议通道很关键：chat_type 决定走哪个发送接口。
+                chat = 2 if text in self.allowed_groups else 1
+                return self._check_peer(Peer(chat_type=chat, peer_uid=text, name=text))
             return Decision(
                 False,
                 CODE_NOT_FOUND,
-                f"本地映射里没有「{text}」，先跑 `arklink peers scan` 或手写 ~/.arklink/peers.json",
+                f"本地映射里没有「{text}」，先 `arklink peers allow {text}` 或 `arklink roster --save-peers`",
             )
         return self._check_peer(hits[0])
 
@@ -202,7 +317,12 @@ class SendPolicy:
     def describe(self) -> str:
         names = "、".join(self.allowed_peers) or "（空）"
         uins = "、".join(self.allowed_uins) or "（空）"
-        group = "允许" if self.allow_group else "关闭"
+        if not self.allow_group:
+            group = "关闭"
+        elif self.allowed_groups:
+            group = "允许（" + "、".join(self.allowed_groups) + "）"
+        else:
+            group = "允许（不限群）"
         return f"账号 {uins} → 收件人 {names}，群聊{group}，已知联系人 {len(self.peers)} 个"
 
 

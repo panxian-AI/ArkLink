@@ -185,11 +185,57 @@ class WebUI:
                 "allowed_uins": list(self.service.policy.allowed_uins),
                 "allowed_peers": list(self.service.policy.allowed_peers),
                 "allow_group": self.service.policy.allow_group,
+                "allowed_groups": list(self.service.policy.allowed_groups),
                 "max_length": self.service.policy.max_length,
             },
             "qq": self._qq_status(),
             "client": self._client_status(),
             "peers": [p.as_dict() for p in load_peers()][:50],
+        }
+
+    def update_policy(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """白名单自助修改：页面上就能加人/加群，不用去命令行。"""
+        action = str(payload.get("action") or "").strip().lower()
+        raw = payload.get("values", payload.get("value", []))
+        if isinstance(raw, str):
+            values = [v.strip() for v in raw.replace("，", ",").split(",") if v.strip()]
+        elif isinstance(raw, (list, tuple)):
+            values = [str(v).strip() for v in raw if str(v).strip()]
+        else:
+            values = []
+        group = bool(payload.get("group"))
+        policy = self.service.policy
+
+        if action == "allow":
+            if not values:
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "code": 1400, "msg": "要给对象"}
+            added = policy.allow(*values, group=group)
+            policy.save()
+            msg = f"已允许：{'、'.join(added)}" if added else "本来就在白名单里"
+        elif action == "deny":
+            if not values:
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "code": 1400, "msg": "要给对象"}
+            removed = policy.deny(*values)
+            policy.save()
+            msg = f"已移除：{'、'.join(removed)}" if removed else "本来就不在白名单里"
+        elif action == "reset":
+            if not payload.get("yes"):
+                return HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "code": 1400,
+                    "msg": "重置会恢复默认边界，需要 yes=true",
+                }
+            policy.reset()
+            msg = "已恢复默认：只发示例好友、群聊关闭"
+        else:
+            return HTTPStatus.BAD_REQUEST, {"ok": False, "code": 1400, "msg": "action 只能是 allow/deny/reset"}
+
+        self.cache.drop()
+        return HTTPStatus.OK, {
+            "ok": True,
+            "msg": msg,
+            "policy": policy.to_dict(),
+            "describe": policy.describe(),
         }
 
     def history(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -386,6 +432,9 @@ class WebUI:
                 if path == "/api/send":
                     status, data = ui.send(payload if isinstance(payload, dict) else {})
                     return self._send_json(status, data)
+                if path == "/api/policy":
+                    status, data = ui.update_policy(payload if isinstance(payload, dict) else {})
+                    return self._send_json(status, data)
                 if path == "/api/cache/clear":
                     ui.cache.drop()
                     return self._send_json(HTTPStatus.OK, {"ok": True})
@@ -429,7 +478,7 @@ class WebUI:
             self._httpd = None
 
 
-_PAGE = """<!doctype html>
+_PAGE = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{TITLE}}</title>
@@ -576,12 +625,26 @@ async function loadAll(){
       (p.pipe ? p.pipe_state : "无管道"),
       p.pipe_state === "free" ? "ok" : (p.pipe_state === "busy" ? "warn" : ""),
     ]) : [["状态", q.ok ? "有进程" : "没找到 QQ 进程", q.ok ? "ok" : "bad"]]);
+  const limits = s.limits || {};
   kv($("policybox"), [
-    ["账号", (s.limits.allowed_uins||[]).join("、") || "（空）"],
-    ["收件人", (s.limits.allowed_peers||[]).join("、") || "（空）"],
-    ["群聊", s.limits.allow_group ? "允许" : "关闭", s.limits.allow_group ? "warn" : ""],
-    ["上限", s.limits.max_length + " 字"],
+    ["账号", (limits.allowed_uins||[]).join("、") || "（空）"],
+    ["收件人", (limits.allowed_peers||[]).join("、") || "（空）"],
+    ["群聊", limits.allow_group ? ("允许 " + ((limits.allowed_groups||[]).join("、") || "(不限群)")) : "关闭",
+     limits.allow_group ? "warn" : ""],
+    ["上限", (limits.max_length || 0) + " 字"],
   ]);
+  // 白名单自助编辑：加人/加群不用回到命令行
+  $("policybox").insertAdjacentHTML("beforeend",
+    `<div class="row" style="margin-top:10px;gap:6px">
+       <input id="pname" style="flex:1;min-width:80px" placeholder="名字 / 群号（多个用逗号）">
+       <label class="muted row shrink" style="gap:4px;flex:0 0 auto">
+         <input type="checkbox" id="pgroup" style="width:auto"> 群
+       </label>
+       <button class="ghost shrink" onclick="pol('allow')">允许</button>
+       <button class="ghost shrink" onclick="pol('deny')">移除</button>
+       <button class="ghost shrink" onclick="pol('reset')">重置</button>
+     </div>
+     <div class="muted" style="margin-top:6px;font-size:12px">改完立刻生效，存到 ~/.arklink/policy.json</div>`);
   const {data:h} = await api("/api/history?limit=20");
   const rows = (h.items||[]);
   $("hist").innerHTML = rows.length ? rows.map(r => {
@@ -609,6 +672,21 @@ async function loadAll(){
     `<tr><td style="width:150px">${c.name}</td><td class="${cls(c.ok)}" style="width:50px">${c.ok?"✓":"✗"}</td>` +
     `<td><code>${c.detail||""}</code> ${c.hint?`<span class="muted">${c.hint}</span>`:""}</td></tr>`
   ).join("") + `</tbody></table>`;
+}
+async function pol(action){
+  const raw = ($("pname").value || "").trim();
+  if(action !== "reset" && !raw){ toast("先填名字或群号", true); return; }
+  if(action === "reset" && !confirm("恢复默认：只发示例好友、群聊关闭？")) return;
+  const body = {
+    action,
+    values: raw.split(/[,，]/).map(x => x.trim()).filter(Boolean),
+    group: $("pgroup").checked,
+  };
+  if(action === "reset") body.yes = true;
+  const {ok, data} = await api("/api/policy", {method:"POST", headers:{"Content-Type":"application/json"},
+                          body: JSON.stringify(body)});
+  toast((data && data.msg) || (ok ? "已更新" : "失败"), !ok);
+  if(ok) loadAll();
 }
 async function doSend(){
   const to = $("to").value.trim(), text = $("text").value;

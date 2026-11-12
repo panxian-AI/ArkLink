@@ -25,6 +25,12 @@ def _print(obj: Any) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
 
 
+def _fail(message: str, code: int = 1) -> int:
+    """一行错误 + 退出码，CLI 里到处要用。"""
+    print(message, file=sys.stderr)
+    return code
+
+
 async def _probe_milky(args: argparse.Namespace) -> int:
     from .milky import MilkyClient, event_to_raw
 
@@ -225,6 +231,24 @@ def _roster(args: argparse.Namespace) -> int:
             return 1
         finally:
             await adapter.transport.close()  # type: ignore[union-attr]
+        if args.save_peers:
+            from .ntqq.sendpolicy import Peer, save_peers
+
+            peers: list[Peer] = []
+            for friend in data["friends"]:
+                uid = str(friend.get("user_id") or "")
+                if not uid:
+                    continue
+                peers.append(Peer(chat_type=1, peer_uid=uid, uin=uid,
+                                  name=str(friend.get("remark") or ""),
+                                  nick=str(friend.get("nickname") or "")))
+            for group in data["groups"]:
+                gid = str(group.get("group_id") or "")
+                if not gid:
+                    continue
+                peers.append(Peer(chat_type=2, peer_uid=gid, name=str(group.get("group_name") or "")))
+            target = save_peers(peers)
+            print(f"已写入 {target}：好友 {data['friend_count']} 个、群 {data['group_count']} 个")
         if args.json:
             _print({k: v for k, v in data.items() if k != "log"})
         else:
@@ -524,6 +548,117 @@ def _serve_webui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _peers(args: argparse.Namespace) -> int:
+    """白名单自助管理：看 / 加 / 减 / 重置。
+
+    这一组命令是「脱离开发者」的关键：以前要改白名单得改 Python 常量，
+    现在写进 `~/.arklink/policy.json`，改完下一次启动就生效。
+    """
+    from .ntqq.sendpolicy import SendPolicy, policy_path
+
+    policy = SendPolicy.from_config(None)
+    path = policy_path()
+    action = args.action
+
+    if action in ("", "list"):
+        if args.json:
+            _print(
+                {
+                    **policy.to_dict(),
+                    "path": str(path),
+                    "exists": path.exists(),
+                    "describe": policy.describe(),
+                    "contacts": [p.as_dict() for p in policy.peers],
+                }
+            )
+            return 0
+        print(f"策略文件：{path}{'' if path.exists() else '（还没有，改动时会自动创建）'}")
+        print(f"  {policy.describe()}")
+        print(f"  群聊：{'允许 ' + ('、'.join(policy.allowed_groups) or '不限群') if policy.allow_group else '关闭'}")
+        if policy.peers:
+            print(f"  已知联系人 {len(policy.peers)} 个（最多显示 10 个）：")
+            for peer in policy.peers[:10]:
+                kind = "群" if peer.chat_type == 2 else "人"
+                print(f"    [{kind}] {peer.name or peer.nick or peer.peer_uid}  uid={peer.peer_uid}")
+        else:
+            print("  已知联系人：0 个（不影响发送——白名单里的名字可以直接用）")
+        return 0
+
+    if action == "allow":
+        if not args.values:
+            return _fail("要给对象，例如：arklink peers allow 示例好友 505 --group")
+        added = policy.allow(*args.values, group=args.group)
+        policy.save()
+        print(f"已允许：{'、'.join(added)}" if added else "这几个本来就在白名单里")
+        print(f"现在：{policy.describe()}")
+        return 0
+
+    if action == "deny":
+        if not args.values:
+            return _fail("要给对象，例如：arklink peers deny 505")
+        removed = policy.deny(*args.values)
+        policy.save()
+        print(f"已移除：{'、'.join(removed)}" if removed else "这几个本来就不在白名单里")
+        print(f"现在：{policy.describe()}")
+        return 0
+
+    if action == "reset":
+        if not args.yes:
+            return _fail("重置会恢复「只发示例好友、群聊关闭」并删掉策略文件；确认请加 --yes")
+        policy.reset()
+        print("已恢复默认边界：只发示例好友，群聊关闭")
+        return 0
+
+    return _fail(f"不认识的动作 {action}（可用：list / allow / deny / reset）")
+
+
+def _start(args: argparse.Namespace) -> int:
+    """一条命令把控制台跑起来，并自动打开浏览器。
+
+    这是给「自己用」的入口：不用记 `serve webui --host --port --engine` 这一串，
+    双击 start.bat 等价于 `arklink start`。
+    """
+    import threading
+    import webbrowser
+
+    from . import __version__
+    from .ntqq.send import SendService, engine_from_config
+    from .ntqq.sendpolicy import SendPolicy
+    from .webui import WebUI
+
+    policy = SendPolicy.from_config(None)
+    engine = engine_from_config(
+        args.engine,
+        uin=(policy.allowed_uins[0] if policy.allowed_uins else ""),
+        candidates=policy.allowed_uins,
+    )
+    service = SendService(policy, engine)
+    ui = WebUI(service, host=args.host, port=args.port, token="", password=args.password)
+    httpd = ui.build()
+    url = ui.url()
+
+    print(f"ArkLink 控制台 v{__version__}")
+    print(f"  地址  {url}")
+    print(f"  引擎  {getattr(engine, 'name', args.engine)}")
+    print(f"  策略  {policy.describe()}")
+    if not getattr(engine, "available", True):
+        print("  提示  这个引擎现在不可用（QQ 没开 / 不是 Linux / 缺 xdotool），")
+        print("        控制台仍可打开，发送会返回失败原因。")
+    print("  Ctrl+C 停止。关掉这个窗口等于停服。\n", flush=True)
+
+    if not args.no_browser:
+        # 起一个后台线程去开浏览器：Windows 上 webbrowser 可能阻塞几百毫秒，
+        # 放在主线程会把「先打印地址」这件事拖住。
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止", flush=True)
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     """把任意适配器暴露成一个 OneBot 11 服务端（NapCat 平替）。"""
     import json as _json
@@ -758,6 +893,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_roster.add_argument("--port", type=int, default=8080)
     p_roster.add_argument("--json", action="store_true")
     p_roster.add_argument("--dry-run", action="store_true", help="只打印 OIDB 请求体")
+    p_roster.add_argument("--save-peers", action="store_true",
+                          help="把好友/群写进 ~/.arklink/peers.json（发给谁用备注，靠它翻译 uid）")
     p_roster.set_defaults(func=_roster)
 
     p_hook = sub.add_parser("hook", help="注入通道：查进程 / 注入 / 探事件 / 卸载")
@@ -802,6 +939,25 @@ def build_parser() -> argparse.ArgumentParser:
                          help="webui 用哪个发送引擎（默认 host；无头 Linux 用 x11）")
     p_serve.add_argument("--password", default="", help="webui 登录口令（留空则不校验）")
     p_serve.set_defaults(func=lambda a: _serve_webui(a) if a.kind == "webui" else _serve(a))
+
+    p_peers = sub.add_parser("peers", help="白名单自助管理：看 / 加 / 减 / 重置（写 ~/.arklink/policy.json）")
+    p_peers.add_argument("action", nargs="?", default="list",
+                         choices=["list", "allow", "deny", "reset"], help="默认 list")
+    p_peers.add_argument("values", nargs="*", help="对象名（备注 / 群名 / 群号 / QQ号）")
+    p_peers.add_argument("--group", action="store_true",
+                         help="allow 时同时当成群：打开群聊开关并加入群白名单")
+    p_peers.add_argument("--yes", action="store_true", help="reset 需要它")
+    p_peers.add_argument("--json", action="store_true")
+    p_peers.set_defaults(func=_peers)
+
+    p_start = sub.add_parser("start", help="一键启动控制台并打开浏览器（自己用的入口）")
+    p_start.add_argument("--host", default="127.0.0.1", help="默认只听本机")
+    p_start.add_argument("--port", type=int, default=6800)
+    p_start.add_argument("--engine", choices=["host", "pipe", "x11", "dry-run"], default="host",
+                         help="host=操作 QQ 客户端；x11=无头 Linux")
+    p_start.add_argument("--password", default="", help="登录口令，留空则不校验")
+    p_start.add_argument("--no-browser", action="store_true", help="不自动开浏览器")
+    p_start.set_defaults(func=_start)
 
     p_doc = sub.add_parser("doctor", help="体检：环境 / 模块 / 进程 / 管道 / 服务端 / 配置")
     p_doc.add_argument("--config", default="bot.toml", help="ArkBot 配置路径")

@@ -6,3 +6,6 @@
 *.md text
 *.cpp text
 *.h text
+
+# .bat 用 CRLF：某些 cmd.exe 版本对纯 LF 的批处理会漏执行最后一行
+*.bat text eol=crlf
