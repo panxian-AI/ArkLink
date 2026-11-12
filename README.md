@@ -157,6 +157,22 @@ python -m arklink send --to 示例好友 --text "hi" --engine x11 --yes
 共用剪贴板）。四种"另开桌面"的区别见
 [docs/Windows会话隔离.md](docs/Windows会话隔离.md)。
 
+### 内置虚拟环境（`arklink env`）
+
+不想手工装 Ubuntu + QQ + Xvfb？让程序自己建：
+
+```bash
+python -m arklink env plan                 # 算账：装哪块盘、占多少、够不够（只读）
+python -m arklink env create --download    # 建 VM + 无人值守装 Ubuntu + 无头启动
+python -m arklink env push                 # 推仓库进 guest，装 QQ / Xvfb / Arklink
+python -m arklink env status               # 状态、端口、虚拟盘真实占用
+```
+
+`create --dry-run` 会把每条 `VBoxManage` 命令先打出来。镜像落在余量最大的非系统盘
+（`--basefolder`），磁盘上限 8GB 动态分配、实际约 3.4GB；内存 2048MB / 2 核；
+WebUI 与 SSH 只映射到 `127.0.0.1`；剪贴板与拖放默认关闭。`destroy` 必须 `--yes`。
+细节与卡点见 [docs/内置虚拟环境.md](docs/内置虚拟环境.md)。
+
 ### Linux
 
 同一套代码在 Linux 上也能跑：进程发现走 `/proc`，管道换成 Unix domain socket
@@ -286,6 +302,7 @@ tests/
 | [docs/发消息链路.md](docs/发消息链路.md) | 三条发送路线、UI 通道踩坑、进程内直调逆向结论、1.0 清单 |
 | [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑、**各形态磁盘/内存账单** |
 | [docs/Windows会话隔离.md](docs/Windows会话隔离.md) | 「另开一个桌面」四种做法哪个能行：虚拟桌面/CreateDesktop/独立窗口站/独立会话，及 CDP 备选 |
+| [docs/内置虚拟环境.md](docs/内置虚拟环境.md) | `arklink env` 四条命令、无人值守装机的每个参数、资源账单、常见卡点 |
 
 ## 合规与安全
 

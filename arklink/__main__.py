@@ -832,7 +832,167 @@ def build_parser() -> argparse.ArgumentParser:
     p_upd.add_argument("--enable-check", action="store_true", help="开启新版本检测")
     p_upd.set_defaults(func=_update)
 
+    p_env = sub.add_parser("env", help="内置虚拟环境：建/启/停/推代码/删（跑 QQ 用）")
+    p_env.add_argument("action",
+                       choices=["plan", "create", "up", "down", "status", "eject", "push", "destroy"],
+                       help="plan=算账 create=建并装 up/down=启停 eject=摘ISO push=推仓库 destroy=删")
+    p_env.add_argument("--name", default="arklink", help="虚拟机名（默认 arklink）")
+    p_env.add_argument("--iso", default="", help="Ubuntu Server ISO 路径（不给就先在常见目录找）")
+    p_env.add_argument("--iso-url", default="", help="自定义 ISO 下载地址（默认用官方 24.04 SHA256SUMS 解析）")
+    p_env.add_argument("--download", action="store_true", help="允许下载 ISO（约 2.6GB，默认只打印地址）")
+    p_env.add_argument("--user", default="arklink", help="guest 用户名（默认 arklink）")
+    p_env.add_argument("--password", default="", help="guest 密码；不给则自动生成并记在 env.json")
+    p_env.add_argument("--source", default="", help="push 时推哪个目录（默认当前目录）")
+    p_env.add_argument("--json", action="store_true", help="输出 JSON")
+    p_env.add_argument("--dry-run", action="store_true", help="只打印将执行的命令，不动手")
+    p_env.add_argument("--force", action="store_true", help="create 时覆盖同名 VM / down 时强制断电")
+    p_env.add_argument("--yes", action="store_true", help="destroy 确认（会删虚拟磁盘）")
+    p_env.set_defaults(func=_env)
+
     return parser
+
+
+def _env(args: argparse.Namespace) -> int:
+    """内置虚拟环境：把「另开一台机器跑 QQ」变成一条命令。"""
+    import secrets
+
+    from .env import (
+        download_iso,
+        find_local_iso,
+        resolve_iso,
+        EnvManager,
+    )
+    from .env.vbox import VBoxError
+
+    def fail(msg: str, code: int = 1) -> int:
+        print(f"[env] {msg}", file=sys.stderr)
+        return code
+
+    try:
+        mgr = EnvManager.open(args.name, dry_run=args.dry_run)
+    except VBoxError as exc:
+        return fail(str(exc))
+    plan = mgr.plan
+
+    if args.action == "plan":
+        if args.json:
+            _print(plan.as_dict())
+        else:
+            print(f"虚拟机名  {plan.name}")
+            print(f"磁盘位置  {plan.workdir or '（无可用的盘）'}")
+            print(f"虚拟磁盘  {plan.vdi or '—'}（上限 {plan.disk_limit_gb:.0f}GB，"
+                  f"实际预期 {plan.expect_gb:.1f}GB）")
+            print(f"内存/CPU  {plan.ram_mb}MB / {plan.cpus} 核")
+            print(f"端口      WebUI 127.0.0.1:{plan.webui_port}   SSH 127.0.0.1:{plan.ssh_port}")
+            for note in plan.notes:
+                print(f"  · {note}")
+            for problem in plan.problems:
+                print(f"  ✗ {problem}")
+            print("结论：", "可以创建" if plan.ok else "现在还不能创建")
+        return 0 if plan.ok else 1
+
+    if args.action == "create":
+        if not plan.ok:
+            if not args.dry_run:
+                return fail("；".join(plan.problems))
+            for problem in plan.problems:
+                print(f"[env] 注意（dry-run 继续）：{problem}", file=sys.stderr)
+        iso = args.iso or find_local_iso() or find_local_iso([plan.workdir])
+        if not iso:
+            try:
+                ref = resolve_iso()
+            except Exception as exc:
+                return fail(f"{exc}\n手动下载后再 --iso 指定：{exc}")
+            if not args.download:
+                print(f"需要一个 Ubuntu Server ISO（约 2.6GB）：\n  {ref.url}")
+                print(f"  校验和 {ref.sha256}")
+                print(f"下载好放到任意位置，然后：arklink env create --iso <路径>")
+                print(f"或者让我下（会校验 SHA256）：arklink env create --download")
+                return 2
+            target = os.path.join(plan.workdir, ref.name)
+            print(f"[env] 下载 {ref.name} → {target}")
+            iso = download_iso(ref, target)
+        password = args.password or mgr.state.extra.get("password") or secrets.token_urlsafe(9)
+        if mgr.box and not mgr.box.guest_additions_iso():
+            print("[env] 注意：找不到 VBoxGuestAdditions.iso，`env push` 会不可用；"
+                  "装完 VirtualBox 后它会在安装目录里", file=sys.stderr)
+        print(f"[env] guest 用户 {args.user}，密码 {password}")
+        print(f"[env] 磁盘 {plan.vdi}（上限 {plan.disk_limit_gb:.0f}GB，实际约 {plan.expect_gb:.1f}GB）")
+
+        def step(index: int, total: int, label: str, cmd: list[str]) -> None:
+            print(f"[{index + 1}/{total}] {label} …", flush=True)
+            if args.dry_run:
+                print("      + " + " ".join(cmd))
+
+        try:
+            mgr.create(iso, user=args.user, password=password,
+                       force=args.force, on_step=step)
+        except (VBoxError, RuntimeError, FileNotFoundError) as exc:
+            return fail(str(exc))
+        if args.dry_run:
+            return 0
+        print("[env] 安装完成。下一步：")
+        print(f"  arklink env push --password {password}   # 把仓库推进去并装 QQ/Xvfb/Arklink")
+        print(f"  arklink env status                        # 看状态与磁盘占用")
+        return 0
+
+    if args.action == "status":
+        try:
+            data = mgr.status()
+        except VBoxError as exc:
+            return fail(str(exc))
+        if args.json:
+            _print(data)
+        else:
+            print(f"虚拟机 {data['name']}：{data['state']}"
+                  f"{'' if data['exists'] else '（尚未创建）'}")
+            print(f"  磁盘 {data['vdi']} 已用 {data['disk_used_gb']}GB / 上限 {data['disk_limit_gb']:.0f}GB")
+            print(f"  WebUI {data['webui']}")
+            print(f"  SSH   {data['ssh']}")
+        return 0
+
+    if args.action in ("up", "down"):
+        try:
+            if args.action == "up":
+                mgr.up()
+                print(f"[env] 已无头启动 {plan.name}；宿主机不会出现任何窗口")
+                print(f"      WebUI http://127.0.0.1:{plan.webui_port}")
+            else:
+                mgr.down(force=args.force)
+                print(f"[env] 已发送关机信号给 {plan.name}")
+        except VBoxError as exc:
+            return fail(str(exc))
+        return 0
+
+    if args.action == "eject":
+        try:
+            mgr.eject()
+        except VBoxError as exc:
+            return fail(str(exc))
+        print("[env] 已摘掉安装盘并改回硬盘启动")
+        return 0
+
+    if args.action == "push":
+        password = args.password or mgr.state.extra.get("password") or ""
+        if not password and not args.dry_run:
+            return fail("需要 guest 密码：arklink env push --password <上一步打印的密码>")
+        source = args.source or os.getcwd()
+        try:
+            mgr.push(source, password=password)
+        except VBoxError as exc:
+            return fail(str(exc))
+        print("[env] 代码已推进 guest 并执行自举脚本；看日志：arklink env status")
+        return 0
+
+    if args.action == "destroy":
+        try:
+            mgr.destroy(confirm=args.yes)
+        except (RuntimeError, VBoxError) as exc:
+            return fail(str(exc))
+        print(f"[env] 已删除 {plan.name}（含虚拟磁盘）")
+        return 0
+
+    return fail(f"未知动作 {args.action}")
 
 
 def _maybe_notice() -> None:
