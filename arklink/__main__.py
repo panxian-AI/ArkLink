@@ -238,6 +238,37 @@ def _roster(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _send(args: argparse.Namespace) -> int:
+    """发一条消息。默认 dry-run，加 `--yes` 才真的发。
+
+    这条命令是发送链路的「最短验证路径」：不启服务端、不接框架，
+    先确认「策略放行 → 解析 → 引擎 → QQ 里真的出现一条消息」这四步都对。
+    """
+    from .ntqq.send import SendService, engine_from_config
+    from .ntqq.sendpolicy import SendPolicy
+
+    # 白名单来自默认策略 / peers.json，**不接受命令行指定**——
+    # 否则 `--to 谁都能发` 就把闸门拆了，闸门也就没有意义。
+    policy = SendPolicy.from_config(None)
+    engine_kind = "dry-run" if (args.dry_run or not args.yes) else args.engine
+    service = SendService(policy, engine_from_config(engine_kind, uin=args.uin, candidates=policy.allowed_uins))
+
+    result = asyncio.run(service.send(args.to, args.text, uin=args.uin, echo=args.echo))
+    payload = result.as_dict()
+    payload["engine_planned"] = engine_kind
+    payload["policy"] = policy.describe()
+    if args.json:
+        _print(payload)
+    else:
+        flag = "OK " if result.ok else "FAIL"
+        print(f"[{flag}] {result.engine}: {result.msg}")
+        print(f"  → {args.to}: {result.text[:60]!r}")
+        print(f"  策略：{policy.describe()}")
+        if result.code:
+            print(f"  code={result.code}")
+    return 0 if result.ok else 2
+
+
 def _hook(args: argparse.Namespace) -> int:
     """注入通道的四个动作：看进程 / 注入 / 探事件 / 卸载。"""
     import time
@@ -468,6 +499,28 @@ async def _install_verify(pid: int, prefix: str, args: argparse.Namespace) -> in
     )
     if not client.logged_in:
         print("提示：QQ 还没登录完成，登录后通道会自动就绪（无需重新注入）。")
+    return 0
+
+
+def _serve_webui(args: argparse.Namespace) -> int:
+    """起 WebUI 控制台：状态 / 发一条 / 记录 / 体检。"""
+    from .ntqq.send import SendService, engine_from_config
+    from .ntqq.sendpolicy import SendPolicy
+    from .webui import WebUI
+
+    policy = SendPolicy.from_config(None)
+    engine_kind = args.engine
+    engine = engine_from_config(
+        engine_kind,
+        uin=(policy.allowed_uins[0] if policy.allowed_uins else ""),
+        candidates=policy.allowed_uins,
+    )
+    service = SendService(policy, engine)
+    ui = WebUI(service, host=args.host, port=args.port, token=args.token, password=args.password)
+    try:
+        ui.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止", flush=True)
     return 0
 
 
@@ -724,8 +777,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.add_argument("--timeout", type=float, default=20.0, help="--install 等待握手的时间")
     p_hook.set_defaults(func=_hook)
 
+    p_send = sub.add_parser("send", help="发一条消息（默认 dry-run）")
+    p_send.add_argument("--to", required=True, help="收件人：备注 / QQ 号 / uid（必须在白名单里）")
+    p_send.add_argument("--text", required=True, help="消息内容（纯文本，或 OneBot 段数组的 JSON）")
+    p_send.add_argument("--uin", default="1000000001", help="发送账号（默认 1000000001）")
+    p_send.add_argument("--engine", choices=["host", "pipe", "dry-run"], default="host",
+                        help="怎么发：host=操作官方客户端（默认）")
+    p_send.add_argument("--yes", action="store_true", help="真的发出去（不加只演练）")
+    p_send.add_argument("--dry-run", action="store_true", help="强制演练")
+    p_send.add_argument("--echo", default="", help="回显字段")
+    p_send.add_argument("--json", action="store_true")
+    p_send.set_defaults(func=_send)
+
     p_serve = sub.add_parser("serve", help="把适配器暴露成 OneBot 11 服务端（NapCat 平替）")
-    p_serve.add_argument("kind", choices=["onebot"], help="目前只有 onebot")
+    p_serve.add_argument("kind", choices=["onebot", "webui"], help="onebot = 协议端；webui = 管理控制台")
     p_serve.add_argument("--type", default="ntqq-hook", help="适配器类型（见 registry）")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=6700)
@@ -733,7 +798,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--report", default="", help="HTTP 上报地址，逗号分隔")
     p_serve.add_argument("--heartbeat", type=float, default=30.0, help="心跳间隔秒，0 = 关")
     p_serve.add_argument("--set", action="append", metavar="K=V", help="传给适配器的参数，可重复（值按 JSON 解析）")
-    p_serve.set_defaults(func=_serve)
+    p_serve.add_argument("--engine", choices=["host", "pipe", "dry-run"], default="host",
+                         help="webui 用哪个发送引擎（默认 host）")
+    p_serve.add_argument("--password", default="", help="webui 登录口令（留空则不校验）")
+    p_serve.set_defaults(func=lambda a: _serve_webui(a) if a.kind == "webui" else _serve(a))
 
     p_doc = sub.add_parser("doctor", help="体检：环境 / 模块 / 进程 / 管道 / 服务端 / 配置")
     p_doc.add_argument("--config", default="bot.toml", help="ArkBot 配置路径")

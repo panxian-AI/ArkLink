@@ -33,6 +33,8 @@ from ..base import LinkAdapter, api_error
 from . import hookproc, push
 from .hookpipe import HookClient, PipeError
 from .hookproto import CMD_MSG_PUSH, Frame
+from .send import CHAT_C2C, CHAT_GROUP, DryRunEngine, PipeEngine, SendService, engine_from_config
+from .sendpolicy import SendPolicy, load_peers
 
 logger = logging.getLogger("arklink.ntqq.hook")
 
@@ -62,6 +64,8 @@ class HookQQAdapter(LinkAdapter):
         inject_method: str = "loadlibrary",
         pipe_prefix: str = "",
         read_only: bool = True,
+        send_policy: dict[str, Any] | None = None,
+        send_engine: str = "auto",
         wait_process: float = 0.0,
         poll_interval: float = 3.0,
         connect_timeout: float = 12.0,
@@ -76,6 +80,7 @@ class HookQQAdapter(LinkAdapter):
         self.inject_method = inject_method
         self.pipe_prefix = pipe_prefix
         self.read_only = read_only
+        self.send_engine_kind = send_engine
         self.wait_process = wait_process
         self.poll_interval = poll_interval
         self.connect_timeout = connect_timeout
@@ -89,6 +94,20 @@ class HookQQAdapter(LinkAdapter):
         self.injection: hookproc.InjectionResult | None = None
         self.last_error = ""
         self._stats = {"packets": 0, "dropped": 0, "since": 0.0}
+
+        # 发送：策略（发给谁）+ 引擎（怎么发）。read_only 时引擎永远是 dry-run。
+        self.policy = SendPolicy.from_config(send_policy)
+        self.send_service = SendService(
+            self.policy,
+            engine_from_config(
+                send_engine,
+                dry_run=read_only,
+                uin=(self.policy.allowed_uins[0] if self.policy.allowed_uins else ""),
+                candidates=self.policy.allowed_uins,
+            ),
+        )
+        if isinstance(self.send_service.engine, PipeEngine):
+            self.send_service.engine.client = None  # 连上之后再塞 client
 
     # ---------------- 健康度 ----------------
     @property
@@ -158,6 +177,9 @@ class HookQQAdapter(LinkAdapter):
         await self._connect_with_retry(client)
         self.client = client
         self._connected.set()
+        engine = self.send_service.engine
+        if isinstance(engine, PipeEngine):
+            engine.client = client
         logger.info("hook 通道已就绪：pid=%d uin=%s", target.pid, client.uin or "?")
 
         # 3) 守着连接，直到断开或停止
@@ -262,7 +284,28 @@ class HookQQAdapter(LinkAdapter):
         if action in ("send_msg", "send_message", "send_private_msg", "send_group_msg"):
             if self.read_only:
                 raise api_error(action, 1404, "hook 通道处于只读模式（read_only=true），发送走其他通道")
-            raise api_error(action, 1404, "hook 通道的发送链路还没接（只做收消息）")
+            group_id = params.get("group_id")
+            user_id = params.get("user_id")
+            target = group_id or user_id
+            if target is None:
+                raise api_error(action, 1400, "缺少 user_id / group_id")
+            chat_type = CHAT_GROUP if group_id is not None else CHAT_C2C
+            result = await self.send_service.send(
+                str(target),
+                params.get("message"),
+                uin=self.uin,
+                echo=str(params.get("echo") or ""),
+                chat_type=chat_type,
+            )
+            if not result.ok:
+                raise api_error(action, result.code or 1404, result.msg)
+            return {
+                "message_id": result.message_id,
+                "engine": result.engine,
+                "text": result.text,
+                "echo": result.echo,
+                **{k: v for k, v in result.extra.items() if k in ("via", "peer", "elapsed_ms")},
+            }
         if action in ("get_friend_list", "get_group_list"):
             # hook 只给消息流，花名册走 ntqq-native 的 OIDB 查询
             raise api_error(action, 1404, f"hook 通道不提供 {action}，请用 ntqq-native")

@@ -128,6 +128,19 @@ python -m arklink hook --probe --prefix arklink --seconds 30 --ping
 `push.to_onebot` 打通。协议格式、真机步骤和踩坑记录见
 [docs/进程注入通道.md](docs/进程注入通道.md)。
 
+### 发消息 + WebUI 管理
+
+```bash
+python -m arklink send --to 示例好友 --text "hi"          # 默认演练，加 --yes 才真发
+python -m arklink serve webui --port 6800 --password 你的口令   # 浏览器打开 http://127.0.0.1:6800
+```
+
+发送走**官方客户端本身**（认账号窗口 → 搜索会话 → 粘贴 → 回车），消息由客户端产生，
+不拼包、不伪造协议；账号/收件人/群聊三条硬闸门写在代码里，突发连发与多对象由引擎
+排队串行（保序）。WebUI 有口令登录、状态/配置/日志/发送/体检一页，支持多收件人多条。
+**限制**：这条路要抢前台焦点，做不到"最小化后台发送"——那件事要靠进程内直调，
+列在 [docs/发消息链路.md](docs/发消息链路.md) 的 1.0 清单里。
+
 ### Linux
 
 同一套代码在 Linux 上也能跑：进程发现走 `/proc`，管道换成 Unix domain socket
@@ -254,6 +267,7 @@ tests/
 | [docs/挂载到ArkBot.md](docs/挂载到ArkBot.md) | 三种挂载方式、适配器契约、双通道、加新协议 |
 | [docs/Milky接入.md](docs/Milky接入.md) | Milky 配置、映射表、协议差异、排障 |
 | [docs/Satori接入.md](docs/Satori接入.md) | Satori 配置、XML 编码、id 映射、能力对照 |
+| [docs/发消息链路.md](docs/发消息链路.md) | 三条发送路线、UI 通道踩坑、进程内直调逆向结论、1.0 清单 |
 
 ## 合规与安全
 

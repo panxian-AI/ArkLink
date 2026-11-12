@@ -167,6 +167,8 @@ class ClientInfo:
     hwnd: int = 0
     title: str = ""
     foreground: bool = False
+    #: 这个窗口属于哪个 QQ 号（能认出来才有值）
+    uin: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +177,7 @@ class ClientInfo:
             "hwnd": self.hwnd,
             "title": self.title,
             "foreground": self.foreground,
+            "uin": self.uin,
         }
 
 
@@ -190,11 +193,42 @@ class _Win32:
             return
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
-        self.user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
-        self.user32.GetForegroundWindow.restype = ctypes.c_void_p
-        self.user32.FindWindowW.restype = ctypes.c_void_p
-        self.user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
-        self.user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        # 64 位必须显式声明返回指针的 API：ctypes 默认按 32 位 int 截断，
+        # GlobalLock 拿到的高位会被砍掉，memmove 直接写 0 地址。
+        u, k = self.user32, self.kernel32
+        u.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        u.SetForegroundWindow.restype = ctypes.c_bool
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        u.FindWindowW.restype = ctypes.c_void_p
+        u.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        u.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        u.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        u.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        u.IsWindowVisible.restype = ctypes.c_bool
+        u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        u.OpenClipboard.argtypes = [ctypes.c_void_p]
+        u.OpenClipboard.restype = ctypes.c_bool
+        u.EmptyClipboard.restype = ctypes.c_bool
+        u.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        u.SetClipboardData.restype = ctypes.c_void_p
+        u.GetClipboardData.argtypes = [ctypes.c_uint]
+        u.GetClipboardData.restype = ctypes.c_void_p
+        u.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
+        u.SendInput.restype = ctypes.c_uint
+        u.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        u.MapVirtualKeyW.restype = ctypes.c_uint
+        u.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        u.GetWindowRect.restype = ctypes.c_bool
+        k.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        k.GlobalAlloc.restype = ctypes.c_void_p
+        k.GlobalLock.argtypes = [ctypes.c_void_p]
+        k.GlobalLock.restype = ctypes.c_void_p
+        k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        k.GlobalUnlock.restype = ctypes.c_bool
 
     # ---- 进程 ----
     def pids_of(self, names: Iterable[str]) -> list[int]:
@@ -245,13 +279,55 @@ class _Win32:
     def foreground_hwnd(self) -> int:
         return int(self.user32.GetForegroundWindow() or 0) if self.ok else 0
 
+    def rect(self, hwnd: int) -> tuple[int, int, int, int]:
+        """窗口屏幕矩形 (left, top, right, bottom)；拿不到返回全 0。"""
+        if not self.ok or not hwnd:
+            return (0, 0, 0, 0)
+        import ctypes.wintypes as wt
+
+        r = wt.RECT()
+        if not self.user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(r)):
+            return (0, 0, 0, 0)
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+    def click(self, x: int, y: int) -> None:
+        """在屏幕坐标点一下左键。
+
+        为什么用鼠标：QQ NT 的会话搜索框没有可用的快捷键（`Ctrl+F` 打开的是
+        「综合搜索 / 加好友」，不是会话列表），只能点到那个输入框上。
+        """
+        if not self.ok:
+            return
+        u = self.user32
+        u.SetCursorPos(int(x), int(y))
+        time.sleep(0.05)
+        inp = INPUT(type=0)  # 0 = INPUT_MOUSE
+        inp.u.mi = MOUSEINPUT(int(x), int(y), 0, 0x0002, 0, None)  # LEFTDOWN
+        u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.03)
+        inp2 = INPUT(type=0)
+        inp2.u.mi = MOUSEINPUT(int(x), int(y), 0, 0x0004, 0, None)  # LEFTUP
+        u.SendInput(1, ctypes.byref(inp2), ctypes.sizeof(INPUT))
+        time.sleep(0.08)
+
     def focus(self, hwnd: int) -> bool:
+        """把窗口切到前台，并**确认**它真的在前台。
+
+        `SetForegroundWindow` 在调用方不是前台进程时经常被系统拒绝，
+        偷懒不确认的结果就是：粘贴和回车敲进了用户正在用的编辑器里。
+        先按一下 ALT 再调（绕过前台锁的经典手法），失败重试三次。
+        """
         if not self.ok or not hwnd:
             return False
         self.user32.ShowWindow(ctypes.c_void_p(hwnd), 9)  # SW_RESTORE
-        ok = bool(self.user32.SetForegroundWindow(ctypes.c_void_p(hwnd)))
-        time.sleep(0.15)
-        return ok or self.foreground_hwnd() == hwnd
+        for _ in range(3):
+            self.chord([VK_MENU])  # 解除前台锁
+            ok = bool(self.user32.SetForegroundWindow(ctypes.c_void_p(hwnd)))
+            time.sleep(0.2)
+            if ok or self.foreground_hwnd() == hwnd:
+                return self.foreground_hwnd() == hwnd
+            time.sleep(0.2)
+        return False
 
     # ---- 剪贴板 ----
     def set_clipboard(self, text: str) -> bool:
@@ -334,6 +410,10 @@ class ClientHost:
         send_key: str = "enter",
         open_delay: float = 0.6,
         dry_run: bool = True,
+        uin: str = "",
+        candidates: Iterable[str] = (),
+        #: 聊天输入框在窗口内的相对位置（9.9.31 默认布局实测）
+        input_xy: tuple[float, float] = (0.65, 0.87),
     ) -> None:
         self.process_names = tuple(process_names)
         self.search_hotkey = search_hotkey
@@ -342,7 +422,38 @@ class ClientHost:
         self.send_key = send_key
         self.open_delay = open_delay
         self.dry_run = dry_run
+        #: 允许操作哪个号。空 = 不校验（不建议，同机多号时会发错）
+        self.uin = str(uin or "")
+        #: 认号时的候选集合：默认 允许号 + 其它见过的号
+        self.candidates = tuple(str(c) for c in candidates if str(c))
+        self.input_xy = (float(input_xy[0]), float(input_xy[1]))
+        self._uin_cache: dict[int, str] = {}
         self.last_action = ""
+
+    # ---- 账号识别 ----
+    def uin_of_pid(self, pid: int) -> str:
+        """判断某个 QQ 进程是哪个号（内存指纹，见 `qqabi.count_string`）。"""
+        if pid in self._uin_cache:
+            return self._uin_cache[pid]
+        if not IS_WINDOWS:
+            return ""
+        cands = list(self.candidates) or ([self.uin] if self.uin else [])
+        try:
+            from . import qqabi
+
+            # 候选必须包含本机所有登录过的号，否则「单候选」永远赢，
+            # 会把另一个号误判成目标号。allow-list 只用来兜底。
+            for uin in qqabi.installed_uins():
+                if uin not in cands:
+                    cands.append(uin)
+            if not cands:
+                return ""
+            found, _counts = qqabi.whoami(pid, cands)
+        except Exception:
+            found = ""
+        if found:
+            self._uin_cache[pid] = found
+        return found
 
     # ---- 检测 ----
     def detect(self) -> ClientInfo:
@@ -351,17 +462,31 @@ class ClientHost:
         pids = _W32.pids_of(self.process_names)
         if not pids:
             return ClientInfo()
+        windows: list[tuple[int, int, str]] = []
         for pid in pids:
             for hwnd, cls, title in _W32.windows_of_pid(pid):
                 if cls in WINDOW_CLASSES or "QQ" in title:
-                    return ClientInfo(
-                        running=True,
-                        pid=pid,
-                        hwnd=hwnd,
-                        title=title,
-                        foreground=_W32.foreground_hwnd() == hwnd,
-                    )
-        return ClientInfo(running=True, pid=pids[0])
+                    windows.append((pid, hwnd, title))
+        if not windows:
+            return ClientInfo(running=True, pid=pids[0])
+
+        def build(pid: int, hwnd: int, title: str) -> ClientInfo:
+            return ClientInfo(
+                running=True,
+                pid=pid,
+                hwnd=hwnd,
+                title=title,
+                foreground=_W32.foreground_hwnd() == hwnd,
+                uin=self.uin_of_pid(pid),
+            )
+
+        # 多开时窗口标题都叫 "QQ"，必须按账号挑，否则会拿另一个号发出去
+        if self.uin and len(windows) > 1:
+            for pid, hwnd, title in windows:
+                if self.uin_of_pid(pid) == self.uin:
+                    return build(pid, hwnd, title)
+            self.last_action = f"没有找到账号 {self.uin} 的窗口（多开？）"
+        return build(*windows[0])
 
     # ---- 操作 ----
     def focus(self, info: ClientInfo | None = None) -> bool:
@@ -373,44 +498,65 @@ class ClientHost:
         self.last_action = f"focus: {'ok' if ok else 'fail'} hwnd={info.hwnd}"
         return ok
 
-    def send_text(self, text: str) -> bool:
-        """往当前打开的会话发文本（不搜索、不换会话）。"""
+    def send_text(self, text: str, *, hwnd: int = 0) -> bool:
+        """往当前打开的会话发文本：先点输入框，再粘贴、回车。"""
         if not text:
             return False
         if self.dry_run:
             self.last_action = f"[dry-run] send_text {len(text)} 字: {text[:40]!r}"
             logger.info(self.last_action)
             return True
+        hwnd = hwnd or self.detect().hwnd
+        left, top, right, bottom = _W32.rect(hwnd)
+        if not right:
+            self.last_action = "send_text: 拿不到窗口位置"
+            return False
+        # 输入框在聊天区底部（9.9.31 默认布局测得：约 65% 宽、87% 高）
+        _W32.click(
+            left + int((right - left) * self.input_xy[0]),
+            top + int((bottom - top) * self.input_xy[1]),
+        )
         mods, vk = parse_hotkey(self.paste_hotkey)
         if not _W32.set_clipboard(text):
             self.last_action = "send_text: 剪贴板写入失败"
             return False
         _W32.chord([*mods, vk])
-        time.sleep(0.12)
+        time.sleep(0.15)
         self._press_send()
         self.last_action = f"send_text: {len(text)} 字"
         return True
 
     def open_and_send(self, peer: str, text: str) -> bool:
-        """搜索会话 → 打开 → 粘贴 → 发送。peer 是 QQ 号/群号/群名。"""
+        """点会话搜索框 → 点联系人 → 点输入框 → 粘贴 → 回车。
+
+        全程用鼠标点击而不是回车选择：QQ 的「综合搜索」（Ctrl+F）和
+        会话搜索行为不一样，回车在综合搜索里会把人带进加好友页。
+        每一步都验证，失败立刻停——发错对象比发不出去严重得多。
+        """
         if self.dry_run:
             self.last_action = f"[dry-run] open_and_send peer={peer} text={text[:40]!r}"
             logger.info(self.last_action)
             return True
         info = self.detect()
-        if not info.running:
-            self.last_action = "open_and_send: 客户端不在线"
+        if not info.running or not info.hwnd:
+            self.last_action = "open_and_send: 客户端不在线或没有窗口"
             return False
-        if not self.focus(info):
+        if not _W32.focus(info.hwnd):
+            self.last_action = "open_and_send: 没能拿到前台焦点（放弃，不往未知窗口里打字）"
             return False
-        mods, vk = parse_hotkey(self.search_hotkey)
-        _W32.chord([*mods, vk])
-        time.sleep(0.25)
+        left, top, right, bottom = _W32.rect(info.hwnd)
+        if not right:
+            self.last_action = "open_and_send: 拿不到窗口位置"
+            return False
+        # 1) 会话列表顶部的搜索框
+        _W32.click(left + 150, top + 65)
         self._type(str(peer))
         time.sleep(self.open_delay)
-        self._press_send()          # 回车打开第一个搜索结果
-        time.sleep(self.open_delay)
-        return self.send_text(text)
+        # 2) 搜索结果第一条（联系人区，固定出现在搜索框正下方）
+        _W32.click(left + 210, top + 156)
+        time.sleep(self.open_delay + 0.4)  # 等会话加载
+        # 3) 输入框 → 粘贴 → 回车
+        return self.send_text(text, hwnd=info.hwnd)
 
     # ---- 内部 ----
     def _type(self, text: str) -> None:

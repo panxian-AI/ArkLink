@@ -1,0 +1,214 @@
+"""发消息的「闸门」：谁能发、能发给谁。
+
+发消息是这个项目里唯一会**改变服务端状态**的动作，也是唯一会被肉眼看到的动作。
+所以它比收消息多一层硬约束，且这层约束写在代码里，不靠配置自觉：
+
+* **只允许一个账号**：`allowed_uins` 默认 `("1000000001",)`。别的号接进来能收，
+  但 `send_*` 一律拒绝 —— 避免把测试号搞成群发器。
+* **只允许发给白名单里的人**：`allowed_peers` 默认 `("示例好友",)`。匹配对象是
+  备注 / 昵称 / uid，任一命中即可；同名多人视为不唯一，直接拒绝。
+* **群聊默认关闭**：`allow_group=False`。要开必须同时给群号白名单。
+
+拒绝不是抛异常糊过去，而是返回 `Decision(ok=False, code, reason)`，
+让上层（OneBot / CLI）能原样告诉调用方「为什么没发出去」。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable
+
+#: 默认策略：用户明确要求过的边界，改这里等于改产品行为
+DEFAULT_UINS: tuple[str, ...] = ("1000000001",)
+DEFAULT_PEERS: tuple[str, ...] = ("示例好友",)
+
+#: 错误码：沿用 OneBot 的习惯，1400 参数错、1403 无权限、1404 不支持
+CODE_BAD_REQUEST = 1400
+CODE_FORBIDDEN = 1403
+CODE_UNSUPPORTED = 1404
+CODE_NOT_FOUND = 1404
+
+
+@dataclass(frozen=True)
+class Peer:
+    """一个可以发消息的对象。"""
+
+    chat_type: int          # 1 = 私聊, 2 = 群
+    peer_uid: str
+    uin: str = ""
+    name: str = ""          # 备注优先
+    nick: str = ""
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        return tuple(x for x in (self.name, self.nick, self.uin, self.peer_uid) if x)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "chat_type": self.chat_type,
+            "peer_uid": self.peer_uid,
+            "uin": self.uin,
+            "name": self.name,
+            "nick": self.nick,
+        }
+
+
+@dataclass
+class Decision:
+    ok: bool
+    code: int = 0
+    reason: str = ""
+    peer: Peer | None = None
+
+    def __bool__(self) -> bool:  # 方便 `if policy.check(...)`
+        return self.ok
+
+
+def peers_path() -> Path:
+    """`~/.arklink/peers.json`：uid ↔ uin ↔ 备注 的本地映射。
+
+    官方客户端里 uid 是一串 `u_xxx`，OneBot 侧习惯用 QQ 号，两者必须能对上。
+    这个文件由 `arklink peers scan` 生成，也可以手写。
+    """
+    override = os.environ.get("ARKLINK_PEERS")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".arklink" / "peers.json"
+
+
+def load_peers(path: str | os.PathLike[str] | None = None) -> list[Peer]:
+    target = Path(path).expanduser() if path else peers_path()
+    if not target.exists():
+        return []
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = raw.get("peers") if isinstance(raw, dict) else raw
+    peers: list[Peer] = []
+    for item in items or []:
+        if not isinstance(item, dict) or not item.get("peer_uid"):
+            continue
+        peers.append(
+            Peer(
+                chat_type=int(item.get("chat_type") or 1),
+                peer_uid=str(item["peer_uid"]),
+                uin=str(item.get("uin") or ""),
+                name=str(item.get("name") or ""),
+                nick=str(item.get("nick") or ""),
+            )
+        )
+    return peers
+
+
+def save_peers(peers: Iterable[Peer], path: str | os.PathLike[str] | None = None) -> Path:
+    target = Path(path).expanduser() if path else peers_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "peers": [p.as_dict() for p in peers]}
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+@dataclass
+class SendPolicy:
+    """发送白名单。默认值就是用户定下的那条：1000000001 → 示例好友。"""
+
+    allowed_uins: tuple[str, ...] = DEFAULT_UINS
+    allowed_peers: tuple[str, ...] = DEFAULT_PEERS
+    allow_group: bool = False
+    allowed_groups: tuple[str, ...] = ()
+    max_length: int = 3000
+    peers: list[Peer] = field(default_factory=list)
+
+    # ---------------- 构造 ----------------
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any] | None = None, *, load: bool = True) -> "SendPolicy":
+        cfg = dict(cfg or {})
+        uins = cfg.get("allowed_uins", DEFAULT_UINS)
+        names = cfg.get("allowed_peers", DEFAULT_PEERS)
+        policy = cls(
+            allowed_uins=_as_tuple(uins),
+            allowed_peers=_as_tuple(names),
+            allow_group=bool(cfg.get("allow_group", False)),
+            allowed_groups=_as_tuple(cfg.get("allowed_groups", ())),
+            max_length=int(cfg.get("max_length", 3000)),
+        )
+        if load:
+            policy.peers = load_peers(cfg.get("peers_file"))
+        return policy
+
+    # ---------------- 判定 ----------------
+    def check_account(self, uin: str | int) -> Decision:
+        text = str(uin or "").strip()
+        if not text:
+            return Decision(False, CODE_FORBIDDEN, "还没拿到登录号，不能发消息")
+        if text not in self.allowed_uins:
+            allowed = "、".join(self.allowed_uins) or "（空）"
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                f"当前登录账号 {text} 不在发送白名单里（只允许 {allowed}）",
+            )
+        return Decision(True)
+
+    def resolve(self, target: str | int | Peer) -> Decision:
+        """把「示例好友 / QQ号 / uid」解析成一个明确的 Peer。"""
+        if isinstance(target, Peer):
+            return self._check_peer(target)
+        text = str(target or "").strip()
+        if not text:
+            return Decision(False, CODE_BAD_REQUEST, "没给收件人")
+        hits = [p for p in self.peers if text in p.aliases]
+        if len(hits) > 1:
+            same = {(p.chat_type, p.peer_uid) for p in hits}
+            if len(same) > 1:
+                names = "、".join(f"{p.name or p.nick or p.peer_uid}" for p in hits[:4])
+                return Decision(False, CODE_FORBIDDEN, f"「{text}」匹配到多个对象（{names}），不唯一")
+        if not hits:
+            # 自举：白名单里点名的对象，即使还没扫过花名册也允许发。
+            # 否则「只发给示例好友」这条要求会被一个不存在的 peers.json 卡住，
+            # 而 UI 通道本来就只需要一个能在搜索框里打出来的名字。
+            if text in self.allowed_peers and text not in ("", "*"):
+                return self._check_peer(Peer(chat_type=1, peer_uid=text, name=text))
+            return Decision(
+                False,
+                CODE_NOT_FOUND,
+                f"本地映射里没有「{text}」，先跑 `arklink peers scan` 或手写 ~/.arklink/peers.json",
+            )
+        return self._check_peer(hits[0])
+
+    def _check_peer(self, peer: Peer) -> Decision:
+        if peer.chat_type == 2 and not self.allow_group:
+            return Decision(False, CODE_FORBIDDEN, "群聊发送被策略关闭（allow_group=false）")
+        if peer.chat_type == 2 and self.allowed_groups and peer.peer_uid not in self.allowed_groups:
+            return Decision(False, CODE_FORBIDDEN, f"群 {peer.peer_uid} 不在群白名单里")
+        allowed = set(self.allowed_peers)
+        if allowed and not (set(peer.aliases) & allowed):
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                f"「{peer.name or peer.nick or peer.peer_uid}」不在收件人白名单里（只允许 {'、'.join(self.allowed_peers)}）",
+            )
+        return Decision(True, peer=peer)
+
+    def check_length(self, text: str) -> Decision:
+        if len(text) > self.max_length:
+            return Decision(False, CODE_BAD_REQUEST, f"单条消息 {len(text)} 字，超过上限 {self.max_length}")
+        return Decision(True)
+
+    def describe(self) -> str:
+        names = "、".join(self.allowed_peers) or "（空）"
+        uins = "、".join(self.allowed_uins) or "（空）"
+        group = "允许" if self.allow_group else "关闭"
+        return f"账号 {uins} → 收件人 {names}，群聊{group}，已知联系人 {len(self.peers)} 个"
+
+
+def _as_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(x.strip() for x in value.replace("，", ",").split(",") if x.strip())
+    return tuple(str(x).strip() for x in value if str(x).strip())
