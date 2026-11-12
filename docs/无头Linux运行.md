@@ -44,7 +44,40 @@ Windows 上 UI 通道的死结在于：键鼠输入只会送给**前台窗口**�
 * 版本历史（含直链与校验和）：<https://github.com/Rodert/qq-versions/releases>
 * 三种包：`.deb` / `.rpm` / `.AppImage`（AppImage 免安装，适合塞进容器）
 
-## 三、最小环境（Debian 12，容器或虚拟机都行）
+### 就想用 Ubuntu？可以，但别装 Ubuntu Desktop
+
+Ubuntu 和 Debian 同源，这套方案整条都能用，唯一要改的是镜像和依赖名：
+
+| 镜像 | 结论 |
+|------|------|
+| **Ubuntu Server 24.04 LTS（minimal）** | ✅ 首选 Ubuntu 路线：无 GUI，装完 ~1.5GB，空闲内存 150–200MB |
+| **Ubuntu Base 24.04**（rootfs tarball） | ✅ 塞容器最省，基础 ~30MB，自己加 sysv/systemd 都行 |
+| Ubuntu Desktop 24.04 | ❌ 不要：GNOME + gdm3 + snap，开机就 1.2GB，自带通知与焦点行为 |
+| Lubuntu / Xubuntu | ⚠️ 能跑，但为「无头」背一整套桌面不划算 |
+
+相比 Debian 12 slim 的代价只是多 ~100MB 内存、systemd 服务多几个；换来的是**官方
+deb 主要在 Ubuntu 上验证过、搜到的答案九成能直接套**。如果你本来就用 Ubuntu，选它没错。
+
+四个 Ubuntu 专属的坑，按踩到的概率排序：
+
+1. **中文字体缺失**（必踩）：`minimal` 镜像不带 CJK 字体，发给示例好友的中文在 QQ 里
+   全是方块，而且字体一缺布局就变，坐标校准跟着一起错。装 `fonts-wqy-microhei`。
+2. **`libasound2` 改名**：24.04 起是 `libasound2t64`，手抄依赖清单必报
+   `Depends: libasound2 but it is not installable`。**别用 `dpkg -i`**，用
+   `apt install ./QQ_*.deb`，让 apt 自己解依赖。
+3. **非特权 user namespace 被 AppArmor 挡住**：24.04 默认
+   `kernel.apparmor_restrict_unprivileged_userns=1`，Chromium 内核的 QQ 可能起不来
+   沙箱。表现是启动即退或空白窗口。确认真是这条再关：
+   ```bash
+   sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # 临时
+   echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/99-qq.conf
+   ```
+   容器里更简单：直接 `--no-sandbox`（安全边界由容器负责）。
+4. **不要 `apt install ubuntu-desktop` / `tasksel`**：装了就把 GNOME 的窗口管理器和
+   守护进程一起带进 Xvfb，费内存还抢焦点。Ubuntu 路线只需要
+   `xvfb openbox xdotool`，和 Debian 一字不差。
+
+## 三、最小环境（Debian 12 / Ubuntu 24.04，容器或虚拟机都行）
 
 ```bash
 # 1) 基础：虚拟屏幕 + 窗口管理器 + 按键工具 + 中文字体
@@ -53,6 +86,7 @@ apt update && apt install -y \
   fonts-wqy-microhei fontconfig \
   libgbm1 libasound2 libnss3 libxss1 libxtst6 libatk-bridge2.0-0 \
   python3 python3-pip ca-certificates wget
+  # Ubuntu 24.04 上把 libasound2 换成 libasound2t64（t64 改名），别两个都写
 
 # 2) QQ Linux 版（NT 架构）。版本号会变，去 im.qq.com/linuxqq 或
 #    github.com/Rodert/qq-versions/releases 取当前直链
@@ -82,7 +116,7 @@ websockify --web /usr/share/novnc 6080 localhost:5900 &
 
 扫完把 `~/.config/QQ`（或容器里的 `data/`）备份下来，下次换机器直接拷，省一次扫码。
 
-## 三、发送
+## 四、发送
 
 ```bash
 export DISPLAY=:99
@@ -110,7 +144,7 @@ xdotool key Return                → 发送
 X11Engine(search_xy=(150, 65), input_xy=(0.65, 0.87))
 ```
 
-## 四、Docker（更省事）
+## 五、Docker（更省事）
 
 ```dockerfile
 FROM debian:12-slim
@@ -134,7 +168,7 @@ CMD ["bash","-lc","Xvfb :99 -screen 0 1280x800x24 & openbox & sleep 1; \
 * `openbox` 不能省：没有窗口管理器，`windowactivate` 不会生效；
 * 端口 6800 是 WebUI，映射出来加 `--password`；VNC 只用来首次扫码，扫完就别暴露。
 
-## 五、和 Windows 注入通道的关系
+## 六、和 Windows 注入通道的关系
 
 两条腿，各管一段：
 
@@ -147,7 +181,7 @@ CMD ["bash","-lc","Xvfb :99 -screen 0 1280x800x24 & openbox & sleep 1; \
 Linux 端的注入（`ptrace + dlopen`）代码已经在仓库里，等 `pipe` 引擎补上 send，
 无头环境就能彻底摆脱「模拟点击」。
 
-## 六、已知坑
+## 七、已知坑
 
 1. **首次扫码**：QQ Linux 版没有无交互登录；扫完记得备份登录态目录。
 2. **字体**：不装 `fonts-wqy-*` 会看到方块，坐标校准也会失败（布局会变）。
