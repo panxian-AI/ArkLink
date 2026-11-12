@@ -63,6 +63,7 @@ def create_commands(plan: EnvPlan, *, ostype: str = DEFAULT_OSTYPE) -> list[list
          "--port", "0", "--device", "0", "--type", "hdd", "--medium", vdi],
         [VBM, "modifyvm", name,
          "--natpf1", f"webui,tcp,127.0.0.1,{plan.webui_port},,6800",
+         "--natpf1", f"api,tcp,127.0.0.1,{plan.api_port},,6900",
          "--natpf1", f"ssh,tcp,127.0.0.1,{plan.ssh_port},,22"],
     ]
 

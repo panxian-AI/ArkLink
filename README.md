@@ -66,6 +66,31 @@ arklink peers allow 505 --group    # 自己加人/加群，改完立刻生效
 要发给群必须显式 `--group` 打开一次。完整自助手册（含开机自启、手机访问、
 出错排查表）见 [docs/自己用.md](docs/自己用.md)。
 
+### 当成 bot 用：上层只写一个函数
+
+ArkLink 的定位是一个 **QQ bot 运行时**：收发、白名单、去重、续传都归它，上层只管业务。
+
+```bash
+arklink serve api                # 起 bot 接口（HTTP + SSE），地址和 token 自动落盘
+arklink bot new mybot.py         # 生成模板
+arklink bot run mybot.py         # 跑
+arklink bot check                # 出问题先跑这个，逐项给下一步
+```
+
+```python
+from arklink.bot import Bot
+bot = Bot()
+
+@bot.on_message
+def echo(msg):
+    return f"收到：{msg['text']}"   # 返回字符串 = 自动回复
+```
+
+任何语言都能接：`GET /api/v1/stream` 收消息、`POST /api/v1/send` 发消息。
+**能力矩阵**（`GET /api/v1/capabilities`）逐条告诉你当前通道能做什么、缺什么，
+不支持的会带 `need` 返回 1404，而不是假装成功。完整接入说明（接口清单、消息字段、
+错误码、虚拟机后台部署）见 [docs/接入上层.md](docs/接入上层.md)。
+
 ### 接一个 Milky 协议端
 
 ```toml
@@ -146,7 +171,7 @@ python -m arklink hook --probe --prefix arklink --seconds 30 --ping
 ### 发消息 + WebUI 管理
 
 ```bash
-python -m arklink send --to 示例好友 --text "hi"          # 默认演练，加 --yes 才真发
+python -m arklink send --to 备注名 --text "hi"        # 默认演练，加 --yes 才真发
 python -m arklink serve webui --port 6800 --password 你的口令   # 浏览器打开 http://127.0.0.1:6800
 ```
 
@@ -157,7 +182,7 @@ python -m arklink serve webui --port 6800 --password 你的口令   # 浏览器�
 不打扰宿主机的任何程序，把 QQ 放进无头 Linux 的虚拟屏幕里跑：
 
 ```bash
-python -m arklink send --to 示例好友 --text "hi" --engine x11 --yes
+python -m arklink send --to 备注名 --text "hi" --engine x11 --yes
 ```
 
 配方（Debian 12 + Xvfb + QQ Linux + xdotool，含 Dockerfile）见
@@ -318,6 +343,7 @@ tests/
 | [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑、**各形态磁盘/内存账单** |
 | [docs/Windows会话隔离.md](docs/Windows会话隔离.md) | 「另开一个桌面」四种做法哪个能行：虚拟桌面/CreateDesktop/独立窗口站/独立会话，及 CDP 备选 |
 | [docs/内置虚拟环境.md](docs/内置虚拟环境.md) | `arklink env` 四条命令、无人值守装机的每个参数、资源账单、常见卡点 |
+| [docs/接入上层.md](docs/接入上层.md) | **给上层开发者**：bot 回调 / HTTP+SSE / OneBot 三种接法、接口清单、能力矩阵、错误码与 need、虚拟机后台运行 |
 | [docs/自己用.md](docs/自己用.md) | **给使用者**：双击启动、三分钟跑起来、白名单自助修改、505 群三步示例、排查表 |
 
 ## 合规与安全

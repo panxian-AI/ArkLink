@@ -3,9 +3,11 @@
 发消息是这个项目里唯一会**改变服务端状态**的动作，也是唯一会被肉眼看到的动作。
 所以它比收消息多一层硬约束，且这层约束写在代码里，不靠配置自觉：
 
-* **只允许一个账号**：`allowed_uins` 默认 `("1000000001",)`。别的号接进来能收，
-  但 `send_*` 一律拒绝 —— 避免把测试号搞成群发器。
-* **只允许发给白名单里的人**：`allowed_peers` 默认 `("示例好友",)`。匹配对象是
+* **默认什么都不允许**：`allowed_uins` 与 `allowed_peers` 出厂都是空。
+  没配置就发不出去，提示里直接告诉你怎么配 —— 仓库里不写死任何人的号或备注，
+  别人拿到代码不会误发到原作者账号上。
+* **只允许配置过的账号**：`allowed_uins` 里没有的号，`send_*` 一律拒绝。
+* **只允许发给白名单里的人**：`allowed_peers` 为空 = 全拒。匹配对象是
   备注 / 昵称 / uid，任一命中即可；同名多人视为不唯一，直接拒绝。
 * **群聊默认关闭**：`allow_group=False`。要开必须同时给群号白名单。
 
@@ -21,9 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-#: 默认策略：用户明确要求过的边界，改这里等于改产品行为
-DEFAULT_UINS: tuple[str, ...] = ("1000000001",)
-DEFAULT_PEERS: tuple[str, ...] = ("示例好友",)
+#: 出厂默认：**空**。空不是「不限」，而是「还没配置」——
+#: 想发消息必须先 `arklink peers uin <你的号>` 和 `peers allow <备注>`。
+#: 这样仓库里没有任何人的真实账号，别人 clone 下来也不会误发到原作者。
+DEFAULT_UINS: tuple[str, ...] = ()
+DEFAULT_PEERS: tuple[str, ...] = ()
 
 #: 错误码：沿用 OneBot 的习惯，1400 参数错、1403 无权限、1404 不支持
 CODE_BAD_REQUEST = 1400
@@ -164,7 +168,7 @@ def save_policy_file(
 
 @dataclass
 class SendPolicy:
-    """发送白名单。默认值就是用户定下的那条：1000000001 → 示例好友。"""
+    """发送白名单。出厂为空，谁都没配 → 谁都发不出去。"""
 
     allowed_uins: tuple[str, ...] = DEFAULT_UINS
     allowed_peers: tuple[str, ...] = DEFAULT_PEERS
@@ -178,7 +182,7 @@ class SendPolicy:
     def from_config(cls, cfg: dict[str, Any] | None = None, *, load: bool = True) -> "SendPolicy":
         """默认值 → `policy.json` → 调用方传入的 cfg（越靠后优先级越高）。
 
-        三层是刻意的：代码里的默认值就是产品的安全底线（1000000001 → 示例好友、群聊关闭），
+        三层是刻意的：代码里的默认值就是产品的安全底线（空白名单、群聊关闭），
         文件层让用户能自己加人，cfg 层留给测试和一次性覆盖。
         """
         merged: dict[str, Any] = load_policy_file() if load else {}
@@ -226,6 +230,18 @@ class SendPolicy:
                     self.allowed_groups = (*self.allowed_groups, name)
         return added
 
+    def allow_uin(self, *uins: str) -> list[str]:
+        """配置发送账号白名单。空参数不动；返回真正新增的号。"""
+        added: list[str] = []
+        for raw in uins:
+            uin = str(raw or "").strip()
+            if not uin:
+                continue
+            if uin not in self.allowed_uins:
+                self.allowed_uins = (*self.allowed_uins, uin)
+                added.append(uin)
+        return added
+
     def deny(self, *names: str) -> list[str]:
         """从白名单里删掉，返回真正删掉的那几个。"""
         removed: list[str] = []
@@ -256,7 +272,17 @@ class SendPolicy:
     def check_account(self, uin: str | int) -> Decision:
         text = str(uin or "").strip()
         if not text:
-            return Decision(False, CODE_FORBIDDEN, "还没拿到登录号，不能发消息")
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                "还没配置发送账号：先 `arklink peers uin <你的QQ号>`（或写进 policy.json 的 allowed_uins）",
+            )
+        if not self.allowed_uins:
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                "发送账号白名单是空的（出厂默认）：先 `arklink peers uin <你的QQ号>`",
+            )
         if text not in self.allowed_uins:
             allowed = "、".join(self.allowed_uins) or "（空）"
             return Decision(
@@ -267,12 +293,18 @@ class SendPolicy:
         return Decision(True)
 
     def resolve(self, target: str | int | Peer) -> Decision:
-        """把「示例好友 / QQ号 / uid」解析成一个明确的 Peer。"""
+        """把「备注 / QQ号 / uid」解析成一个明确的 Peer。"""
         if isinstance(target, Peer):
             return self._check_peer(target)
         text = str(target or "").strip()
         if not text:
             return Decision(False, CODE_BAD_REQUEST, "没给收件人")
+        if not self.allowed_peers:
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                "收件人白名单是空的（出厂默认）：先 `arklink peers allow <备注或群名>`",
+            )
         hits = [p for p in self.peers if text in p.aliases]
         if len(hits) > 1:
             same = {(p.chat_type, p.peer_uid) for p in hits}
@@ -281,7 +313,7 @@ class SendPolicy:
                 return Decision(False, CODE_FORBIDDEN, f"「{text}」匹配到多个对象（{names}），不唯一")
         if not hits:
             # 自举：白名单里点名的对象，即使还没扫过花名册也允许发。
-            # 否则「只发给示例好友」这条要求会被一个不存在的 peers.json 卡住，
+            # 否则「只发白名单里的人」这条要求会被一个不存在的 peers.json 卡住，
             # 而 UI 通道本来就只需要一个能在搜索框里打出来的名字。
             if text in self.allowed_peers and text not in ("", "*"):
                 # 名字同时出现在群白名单里，就按群会话处理；否则按私聊。
@@ -296,12 +328,18 @@ class SendPolicy:
         return self._check_peer(hits[0])
 
     def _check_peer(self, peer: Peer) -> Decision:
+        if not self.allowed_peers:
+            return Decision(
+                False,
+                CODE_FORBIDDEN,
+                "收件人白名单是空的（出厂默认）：先 `arklink peers allow <备注或群名>`",
+            )
         if peer.chat_type == 2 and not self.allow_group:
             return Decision(False, CODE_FORBIDDEN, "群聊发送被策略关闭（allow_group=false）")
         if peer.chat_type == 2 and self.allowed_groups and peer.peer_uid not in self.allowed_groups:
             return Decision(False, CODE_FORBIDDEN, f"群 {peer.peer_uid} 不在群白名单里")
         allowed = set(self.allowed_peers)
-        if allowed and not (set(peer.aliases) & allowed):
+        if not (set(peer.aliases) & allowed):
             return Decision(
                 False,
                 CODE_FORBIDDEN,
@@ -315,8 +353,8 @@ class SendPolicy:
         return Decision(True)
 
     def describe(self) -> str:
-        names = "、".join(self.allowed_peers) or "（空）"
-        uins = "、".join(self.allowed_uins) or "（空）"
+        names = "、".join(self.allowed_peers) or "未配置"
+        uins = "、".join(self.allowed_uins) or "未配置"
         if not self.allow_group:
             group = "关闭"
         elif self.allowed_groups:

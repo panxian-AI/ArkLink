@@ -310,11 +310,28 @@ class EnvManager:
             "disk_limit_gb": self.plan.disk_limit_gb,
             "ram_mb": self.plan.ram_mb,
             "webui": f"http://127.0.0.1:{self.plan.webui_port}",
+            "api": f"http://127.0.0.1:{self.plan.api_port}",
             "ssh": f"ssh -p {self.plan.ssh_port} {self.state.user}@127.0.0.1",
         }
         return data
 
     # ------------------------------------------------------------ 推代码
+    def api_token(self, *, password: str) -> str:
+        """从 guest 里取 API token。宿主侧拿它给上层程序用，不用进虚拟机手抄。"""
+        if self.dry_run:
+            return "dry-run"
+        cmds = guest_run_commands(
+            self.plan.name, "cat /etc/arklink/api.token",
+            user=self.state.user, password=password,
+        )
+        out = "\n".join(self.require_box().apply(cmds, timeout=120))
+        # guestcontrol 会带一些提示行；取最后一行像 token 的（无空格、8~64 字符）
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line and " " not in line and 8 <= len(line) <= 64:
+                return line
+        return out.strip()
+
     def push(self, source: str, *, password: str, script: str = SETUP_SCRIPT) -> str:
         """把宿主仓库推进 guest 并执行自举脚本（guest 内会装 QQ/Xvfb/Arklink）。"""
         if self.dry_run:

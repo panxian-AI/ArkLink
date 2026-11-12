@@ -25,8 +25,9 @@ RAM_MB = 2048
 CPUS = 2
 # 宿主机至少要剩这么多内存给虚拟机
 HOST_RAM_HEADROOM_GB = 2.0
-# 端口：WebUI 与 SSH 都只映射到 127.0.0.1，宿主外部访问不到
+# 端口：WebUI / API / SSH 都只映射到 127.0.0.1，宿主外部访问不到
 WEBUI_PORT = 6800
+API_PORT = 6900
 SSH_PORT = 2222
 
 
@@ -39,6 +40,7 @@ class EnvPlan:
     cpus: int = CPUS
     disk_limit_gb: float = DISK_LIMIT_GB
     webui_port: int = WEBUI_PORT
+    api_port: int = API_PORT
     ssh_port: int = SSH_PORT
     user: str = "arklink"
     ok: bool = False

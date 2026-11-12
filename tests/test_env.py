@@ -132,6 +132,8 @@ def test_create_commands_layout():
     assert "--audio-driver none" in modify
     nat = " ".join(cmds[-1])
     assert "webui,tcp,127.0.0.1,6800" in nat and "ssh,tcp,127.0.0.1,2222" in nat
+    # bot 接口也要映射，否则宿主机上的上层程序连不上
+    assert "api,tcp,127.0.0.1,6900" in nat
 
 
 def test_unattended_commands_include_sudo_and_additions():
@@ -230,6 +232,7 @@ def test_manager_status_reports_paths_and_ports():
     data = mgr.status()
     assert data["state"] == "poweroff" and data["exists"] is True
     assert data["webui"].startswith("http://127.0.0.1:")
+    assert data["api"].endswith(":6900")
     assert data["disk_limit_gb"] == DISK_LIMIT_GB
     assert data["ssh"].startswith("ssh -p ")
 

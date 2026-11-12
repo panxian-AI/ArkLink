@@ -5,7 +5,7 @@
 
     GET  /                 单页控制台（状态 / 发送 / 记录 / 体检）
     GET  /api/status       适配器 + QQ 进程 + 发送引擎 + 策略
-    POST /api/send         {"to": "示例好友", "text": "hi", "dry_run": true}
+    POST /api/send         {"to": "备注名", "text": "hi", "dry_run": true}
     GET  /api/history      最近发送记录
     GET  /api/doctor       体检报告（缓存 60s，避免每次点都重扫）
 
@@ -226,7 +226,7 @@ class WebUI:
                     "msg": "重置会恢复默认边界，需要 yes=true",
                 }
             policy.reset()
-            msg = "已恢复默认：只发示例好友、群聊关闭"
+            msg = "已恢复出厂：白名单清空、群聊关闭"
         else:
             return HTTPStatus.BAD_REQUEST, {"ok": False, "code": 1400, "msg": "action 只能是 allow/deny/reset"}
 
@@ -533,7 +533,7 @@ _PAGE = r"""<!doctype html>
   <section class="card">
     <h2>发一条</h2>
     <div class="row" style="margin-bottom:10px">
-      <input id="to" class="shrink" style="flex:0 0 180px" placeholder="收件人（备注 / QQ号）" value="示例好友">
+      <input id="to" class="shrink" style="flex:0 0 180px" placeholder="收件人（备注 / QQ号）">
       <label class="muted row shrink" style="gap:6px;flex:0 0 auto">
         <input type="checkbox" id="dry" checked style="width:auto"> 演练（不真发）
       </label>
@@ -676,7 +676,7 @@ async function loadAll(){
 async function pol(action){
   const raw = ($("pname").value || "").trim();
   if(action !== "reset" && !raw){ toast("先填名字或群号", true); return; }
-  if(action === "reset" && !confirm("恢复默认：只发示例好友、群聊关闭？")) return;
+  if(action === "reset" && !confirm("清空白名单（账号/收件人/群聊）？之后要先重新配置才能发。")) return;
   const body = {
     action,
     values: raw.split(/[,，]/).map(x => x.trim()).filter(Boolean),

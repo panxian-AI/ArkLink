@@ -150,6 +150,8 @@ FEATURES: tuple[Feature, ...] = (
     Feature("x11", "0.9.0", "无头 Linux 发送（Xvfb + xdotool，不抢焦点）"),
     Feature("env", "0.10.0", "内置虚拟环境（arklink env：建/启/停/推/删）"),
     Feature("standalone", "0.11.0", "自助使用：policy.json + arklink peers + arklink start + 双击启动"),
+    Feature("bot", "0.12.0", "bot 运行时：MessageBus + arklink bot new/run/check + 能力矩阵"),
+    Feature("api", "0.12.0", "给别人调用的 HTTP + SSE 接口（v1）与 Python SDK"),
 )
 
 _FEATURE_BY_KEY = {f.key: f for f in FEATURES}

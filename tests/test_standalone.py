@@ -2,7 +2,7 @@
 
 这一组测试守住三件事：
 1. 改白名单只写 `~/.arklink/policy.json`，不碰代码，重启后仍在；
-2. 默认边界（只发示例好友、群聊关闭）不会被「文件不存在」或「拼错键名」意外放宽；
+2. 默认边界（只发测试对象、群聊关闭）不会被「文件不存在」或「拼错键名」意外放宽；
 3. `arklink start` 打印的地址就是浏览器打开的地址（不用记参数）。
 """
 
@@ -28,11 +28,15 @@ def isolated_policy(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 落盘
 def test_defaults_when_no_file(isolated_policy):
+    """出厂空白名单：不是「不限」，是「还没配置」。"""
     policy = sp.SendPolicy.from_config(None)
-    assert policy.allowed_uins == ("1000000001",)
-    assert policy.allowed_peers == ("示例好友",)
+    assert policy.allowed_uins == ()
+    assert policy.allowed_peers == ()
     assert policy.allow_group is False
     assert not isolated_policy.exists()
+    # 三句提示必须能直接照着做
+    assert "peers uin" in policy.check_account("10001").reason
+    assert "peers allow" in policy.resolve("某人").reason
 
 
 def test_allow_and_save_roundtrip(isolated_policy):
@@ -70,8 +74,8 @@ def test_deny_removes_from_both_lists(isolated_policy):
 
 def test_config_overrides_file(isolated_policy):
     sp.save_policy_file({"allowed_peers": ["505"], "allow_group": True, "allowed_groups": ["505"]})
-    policy = sp.SendPolicy.from_config({"allowed_peers": ["示例好友"]})
-    assert policy.allowed_peers == ("示例好友",)
+    policy = sp.SendPolicy.from_config({"allowed_peers": ["测试对象"]})
+    assert policy.allowed_peers == ("测试对象",)
     assert policy.allow_group is True  # 文件里的其余字段仍然生效
 
 
@@ -80,14 +84,14 @@ def test_unknown_keys_ignored(isolated_policy):
         json.dumps({"allowed_peer": ["所有人"], "allow_groups": True}), encoding="utf-8"
     )
     policy = sp.SendPolicy.from_config(None)
-    assert policy.allowed_peers == ("示例好友",)
+    assert policy.allowed_peers == ()
     assert policy.allow_group is False
 
 
 def test_broken_file_falls_back_to_defaults(isolated_policy):
     isolated_policy.write_text("{ not json", encoding="utf-8")
     policy = sp.SendPolicy.from_config(None)
-    assert policy.allowed_peers == ("示例好友",)
+    assert policy.allowed_peers == ()
 
 
 def test_reset_restores_defaults_and_deletes_file(isolated_policy):
@@ -97,7 +101,8 @@ def test_reset_restores_defaults_and_deletes_file(isolated_policy):
     assert isolated_policy.exists()
 
     policy.reset()
-    assert policy.allowed_peers == ("示例好友",)
+    assert policy.allowed_peers == ()
+    assert policy.allowed_uins == ()
     assert policy.allow_group is False
     assert not isolated_policy.exists()
 
@@ -132,7 +137,7 @@ def test_cli_peers_allow_group(isolated_policy, capsys):
     out = capsys.readouterr().out
     assert "已允许" in out and "群聊允许" in out
     data = json.loads(isolated_policy.read_text(encoding="utf-8"))
-    assert data["allowed_peers"] == ["示例好友", "505"]
+    assert data["allowed_peers"] == ["505"]
     assert data["allow_group"] is True
 
 
@@ -146,7 +151,7 @@ def test_cli_peers_allow_is_idempotent(isolated_policy, capsys):
 def test_cli_peers_list_json(isolated_policy, capsys):
     assert main(["peers", "list", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["allowed_peers"] == ["示例好友"]
+    assert payload["allowed_peers"] == []
     assert payload["allow_group"] is False
     assert "describe" in payload
 
@@ -169,6 +174,7 @@ def test_cli_peers_reset_needs_yes(isolated_policy, capsys):
 
 
 def test_cli_send_to_group_after_allow(isolated_policy, capsys):
+    main(["peers", "uin", "10001"])
     main(["peers", "allow", "505", "--group"])
     capsys.readouterr()
     assert main(["send", "--to", "505", "--text", "自检"]) == 0
@@ -176,9 +182,11 @@ def test_cli_send_to_group_after_allow(isolated_policy, capsys):
     assert "dry-run" in out and "505" in out
 
 
-def test_cli_send_group_blocked_by_default(isolated_policy, capsys):
+def test_cli_send_blocked_when_nothing_configured(isolated_policy, capsys):
+    """一个刚 clone 下来、什么都没配的人，必须被拦住，并且知道下一步做什么。"""
     assert main(["send", "--to", "505", "--text", "自检"]) == 2
-    assert "没有「505」" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "peers uin" in out and "1403" in out
 
 
 # ---------------------------------------------------------------- start
@@ -284,7 +292,7 @@ def test_api_policy_deny_and_reset(live_ui, isolated_policy):
     status, data = _post(url, "/api/policy", {"action": "reset"})
     assert status == 400 and not data["ok"]  # 没带 yes 不许重置
     status, data = _post(url, "/api/policy", {"action": "reset", "yes": True})
-    assert status == 200 and data["policy"]["allowed_peers"] == ["示例好友"]
+    assert status == 200 and data["policy"]["allowed_peers"] == []
     assert not isolated_policy.exists()
 
 

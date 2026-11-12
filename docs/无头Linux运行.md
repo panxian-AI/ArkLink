@@ -60,7 +60,7 @@ deb 主要在 Ubuntu 上验证过、搜到的答案九成能直接套**。如果
 
 四个 Ubuntu 专属的坑，按踩到的概率排序：
 
-1. **中文字体缺失**（必踩）：`minimal` 镜像不带 CJK 字体，发给示例好友的中文在 QQ 里
+1. **中文字体缺失**（必踩）：`minimal` 镜像不带 CJK 字体，发给对方的中文在 QQ 里
    全是方块，而且字体一缺布局就变，坐标校准跟着一起错。装 `fonts-wqy-microhei`。
 2. **`libasound2` 改名**：24.04 起是 `libasound2t64`，手抄依赖清单必报
    `Depends: libasound2 but it is not installable`。**别用 `dpkg -i`**，用
@@ -120,7 +120,7 @@ websockify --web /usr/share/novnc 6080 localhost:5900 &
 
 ```bash
 export DISPLAY=:99
-python -m arklink send --to 示例好友 --text "hi" --engine x11 --yes
+python -m arklink send --to 备注名 --text "hi" --engine x11 --yes
 python -m arklink serve webui --port 6800 --engine x11
 ```
 
@@ -130,7 +130,7 @@ python -m arklink serve webui --port 6800 --engine x11
 xdotool search --name QQ          → 找窗口
 xdotool windowactivate --sync ID  → 在这个虚拟屏幕里激活（外部无感）
 xdotool mousemove --window ID …   → 点会话搜索框
-xdotool type --clearmodifiers 示例好友 → 输入收件人
+xdotool type --clearmodifiers 备注名 → 输入收件人
 xdotool click 1                   → 点第一条结果
 xdotool mousemove … / click 1     → 点输入框
 xdotool type --clearmodifiers …   → 输入正文

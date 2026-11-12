@@ -38,7 +38,7 @@ class FakeRunner:
         return [c[1] for c in self.calls]
 
 
-def _req(text="hi", peer="示例好友") -> SendRequest:
+def _req(text="hi", peer="测试对象") -> SendRequest:
     return SendRequest(chat_type=1, peer_uid=peer, elements=[Element(kind="text", text=text)],
                        peer_name=peer)
 
@@ -54,7 +54,7 @@ def test_dry_run_touches_nothing():
 def test_send_sequence():
     runner = FakeRunner()
     engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
-    r = asyncio.run(engine.send(_req("你好", "示例好友")))
+    r = asyncio.run(engine.send(_req("你好", "测试对象")))
     assert r.ok and r.extra["via"] == "x11"
     verbs = runner.verbs()
     assert verbs[0] == "search"

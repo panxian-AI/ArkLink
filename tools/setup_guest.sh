@@ -140,6 +140,36 @@ EOF
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable --now arklink.service >/dev/null 2>&1 || warn "systemd 不可用，请手动执行 /opt/arklink/start.sh"
 
+# ---------------------------------------------------------------- 4.5 API 服务（给上层程序调用）
+log "注册 systemd 服务 arklink-api.service（HTTP 接口：收发消息，供其他程序调用）"
+mkdir -p /etc/arklink
+if [ ! -s /etc/arklink/api.token ]; then
+  head -c 48 /dev/urandom | base64 | tr -d '/+=\n' | cut -c1-32 > /etc/arklink/api.token
+fi
+chmod 600 /etc/arklink/api.token
+
+cat > /etc/systemd/system/arklink-api.service <<'UNIT'
+[Unit]
+Description=ArkLink HTTP API (bot interface: send + receive)
+After=network-online.target arklink.service
+Wants=network-online.target arklink.service
+
+[Service]
+Type=simple
+Environment=ARKLINK_API_STATE=/etc/arklink/api.json
+Environment=DISPLAY=:99
+ExecStart=/bin/sh -c 'exec /opt/arklink-venv/bin/python -m arklink serve api --host 0.0.0.0 --port 6900 --engine x11 --token "$(cat /etc/arklink/api.token)"'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable --now arklink-api.service >/dev/null 2>&1 \
+  || warn "systemd 不可用，请手动起：DISPLAY=:${DISPLAY_NUM} /opt/arklink-venv/bin/python -m arklink serve api --engine x11"
+
 # ---------------------------------------------------------------- 5. 自检
 sleep 2
 echo
@@ -148,6 +178,7 @@ DISPLAY=":${DISPLAY_NUM}" xdotool search --name QQ >/dev/null 2>&1 \
   && log "  ✅ 找到 QQ 窗口" \
   || warn "  ⚠️ 还没找到 QQ 窗口——首次需要在 VNC 里扫码登录"
 pgrep -f "arklink serve webui" >/dev/null && log "  ✅ WebUI 进程在跑" || warn "  ⚠️ WebUI 未启动"
+pgrep -f "arklink serve api" >/dev/null && log "  ✅ API 进程在跑（端口 6900）" || warn "  ⚠️ API 未启动"
 echo
 cat <<MSG
 下一步：
@@ -156,7 +187,12 @@ cat <<MSG
        用 VNC 客户端连 <guest-ip>:5900 扫码
   2) 发送自检（在 guest 内）：
        DISPLAY=:${DISPLAY_NUM} /opt/arklink-venv/bin/python -m arklink send \\
-         --to 示例好友 --text "自检" --engine x11 --yes
-  3) 宿主机浏览器打开 http://<guest-ip>:6800 管理
+         --to 备注名 --text "自检" --engine x11 --yes
+  3) 宿主机浏览器打开 http://127.0.0.1:6800 管理（端口已映射到本机）
+  3b) 上层程序接 API：地址 http://127.0.0.1:6900，token 如下
+       ${ARKLINK_API_TOKEN_HINT:-（宿主机执行 arklink env token 取）}
   4) 扫完码备份登录态：tar czf /root/qq-login.tgz ~/.config/QQ
+
+API token（只在本机可见，别人要用就给他这一串）：
+  $(cat /etc/arklink/api.token 2>/dev/null || echo "（还没生成）")
 MSG

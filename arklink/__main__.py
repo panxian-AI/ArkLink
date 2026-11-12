@@ -274,10 +274,11 @@ def _send(args: argparse.Namespace) -> int:
     # 白名单来自默认策略 / peers.json，**不接受命令行指定**——
     # 否则 `--to 谁都能发` 就把闸门拆了，闸门也就没有意义。
     policy = SendPolicy.from_config(None)
+    uin = args.uin or (policy.allowed_uins[0] if policy.allowed_uins else "")
     engine_kind = "dry-run" if (args.dry_run or not args.yes) else args.engine
-    service = SendService(policy, engine_from_config(engine_kind, uin=args.uin, candidates=policy.allowed_uins))
+    service = SendService(policy, engine_from_config(engine_kind, uin=uin, candidates=policy.allowed_uins))
 
-    result = asyncio.run(service.send(args.to, args.text, uin=args.uin, echo=args.echo))
+    result = asyncio.run(service.send(args.to, args.text, uin=uin, echo=args.echo))
     payload = result.as_dict()
     payload["engine_planned"] = engine_kind
     payload["policy"] = policy.describe()
@@ -584,9 +585,19 @@ def _peers(args: argparse.Namespace) -> int:
             print("  已知联系人：0 个（不影响发送——白名单里的名字可以直接用）")
         return 0
 
+    if action == "uin":
+        if not args.values:
+            print(f"当前发送账号：{'、'.join(policy.allowed_uins) or '未配置'}")
+            return 0
+        added = policy.allow_uin(*args.values)
+        policy.save()
+        print(f"已加入发送账号：{'、'.join(added)}" if added else "这几个号本来就在白名单里")
+        print(f"现在：{policy.describe()}")
+        return 0
+
     if action == "allow":
         if not args.values:
-            return _fail("要给对象，例如：arklink peers allow 示例好友 505 --group")
+            return _fail("要给对象，例如：arklink peers allow 备注名")
         added = policy.allow(*args.values, group=args.group)
         policy.save()
         print(f"已允许：{'、'.join(added)}" if added else "这几个本来就在白名单里")
@@ -604,12 +615,12 @@ def _peers(args: argparse.Namespace) -> int:
 
     if action == "reset":
         if not args.yes:
-            return _fail("重置会恢复「只发示例好友、群聊关闭」并删掉策略文件；确认请加 --yes")
+            return _fail("重置会清空白名单（账号、收件人、群聊全部回到出厂状态）并删掉策略文件；确认请加 --yes")
         policy.reset()
-        print("已恢复默认边界：只发示例好友，群聊关闭")
+        print("已恢复出厂：白名单清空，群聊关闭（现在谁都发不出去，先 peers uin / peers allow）")
         return 0
 
-    return _fail(f"不认识的动作 {action}（可用：list / allow / deny / reset）")
+    return _fail(f"不认识的动作 {action}（可用：list / uin / allow / deny / reset）")
 
 
 def _start(args: argparse.Namespace) -> int:
@@ -657,6 +668,113 @@ def _start(args: argparse.Namespace) -> int:
     finally:
         httpd.server_close()
     return 0
+
+
+def _bot(args: argparse.Namespace) -> int:
+    """把它当 bot 用：new 生成模板 / run 跑起来 / check 体检。"""
+    import os
+
+    from .bot import TEMPLATE, Bot, load_bot
+    from .client import ApiError, Client
+
+    action = args.action
+
+    if action == "new":
+        path = args.path or "mybot.py"
+        if os.path.exists(path) and not args.force:
+            return _fail(f"{path} 已存在；要覆盖加 --force")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(TEMPLATE.format(name=os.path.basename(path)))
+        print(f"已生成 {path}")
+        print("\n接下来三步：")
+        print("  1) 先起服务（另开一个窗口）：arklink serve api")
+        print(f"  2) 改 {path} 里的 echo() 函数")
+        print(f"  3) 运行：arklink bot run {path}")
+        return 0
+
+    client = Client.from_env(base_url=args.api, token=args.token)
+
+    if action == "check":
+        rows = Bot(client).check()
+        worst = 0
+        for name, ok, detail in rows:
+            print(f"  {'✅' if ok else '❌'} {name}：{detail}")
+            if not ok:
+                worst = 2
+        if worst == 0:
+            print("\n一切就绪：arklink bot run 你的脚本.py")
+        return worst
+
+    if action == "run":
+        if not args.path:
+            return _fail("要指定脚本：arklink bot run mybot.py（没有就先 arklink bot new mybot.py）")
+        try:
+            bot = load_bot(args.path, client=client)
+        except (FileNotFoundError, AttributeError, ImportError) as exc:
+            return _fail(str(exc))
+        print(f"[bot] 脚本 {args.path}，{len(bot.handlers)} 个 handler，服务 {client.base_url}")
+        try:
+            bot.run(since=args.since, max_messages=args.max)
+        except ApiError as exc:
+            return _fail(f"连不上服务：{exc.msg}。先起服务：arklink serve api")
+        print(f"[bot] 结束：{bot.stats}")
+        return 0
+
+    return _fail(f"不认识的动作 {action}（可用：new / run / check）")
+
+
+def _serve_api(args: argparse.Namespace) -> int:
+    """给「别人调」的 HTTP 接口：发送 + 收消息（SSE）+ 白名单 + 状态。"""
+    from . import __version__
+    from .api import ApiServer, new_token, state_path
+    from .bus import MessageBus
+    from .ntqq.send import SendService, engine_from_config
+    from .ntqq.sendpolicy import SendPolicy
+
+    policy = SendPolicy.from_config(None)
+    engine = engine_from_config(
+        args.engine,
+        uin=(policy.allowed_uins[0] if policy.allowed_uins else ""),
+        candidates=policy.allowed_uins,
+    )
+    service = SendService(policy, engine)
+    token = args.token or new_token()
+    server = ApiServer(
+        service, MessageBus(), host=args.host, port=args.port, token=token, cors=args.cors
+    )
+    httpd = server.build()
+    url = server.url().rstrip("/")
+
+    print(f"ArkLink API v{__version__}")
+    print(f"  地址   {url}")
+    print(f"  token  {token}")
+    print(f"  引擎   {getattr(engine, 'name', args.engine)}"
+          f"{'' if getattr(engine, 'available', True) else '（当前不可用）'}")
+    print(f"  策略   {policy.describe()}")
+    print(f"  已写入 {state_path()}（别人接的时候读这个文件）")
+    print("\n别人怎么调：")
+    print(f'  curl -H "Authorization: Bearer {token}" {url}/api/v1/status')
+    print(f'  curl -H "Authorization: Bearer {token}" -H "Content-Type: application/json" \\')
+    print(f'       -d \'{{"to":"备注名","text":"你好","dry_run":true}}\' {url}/api/v1/send')
+    print(f'  curl -N -H "Authorization: Bearer {token}" "{url}/api/v1/stream"   # 收消息')
+    print("\nCtrl+C 停止。", flush=True)
+    try:
+        # 走 ApiServer 的 serve_forever：它会把地址 + token 写进 ~/.arklink/api.json，
+        # 上层（arklink bot / 别人的脚本）才不用手动传参。
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止", flush=True)
+    finally:
+        server.stop()
+    return 0
+
+
+def _serve_dispatch(args: argparse.Namespace) -> int:
+    if args.kind == "webui":
+        return _serve_webui(args)
+    if args.kind == "api":
+        return _serve_api(args)
+    return _serve(args)
 
 
 def _serve(args: argparse.Namespace) -> int:
@@ -846,7 +964,7 @@ def _update(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="arklink", description="ArkLink 协议探针与逆向工具")
+    parser = argparse.ArgumentParser(prog="arklink", description="ArkLink —— QQ bot 运行时：收发消息 / 白名单 / 给上层调用的 HTTP + SDK")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_milky = sub.add_parser("probe-milky", help="打 Milky 事件流")
@@ -917,7 +1035,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_send = sub.add_parser("send", help="发一条消息（默认 dry-run）")
     p_send.add_argument("--to", required=True, help="收件人：备注 / QQ 号 / uid（必须在白名单里）")
     p_send.add_argument("--text", required=True, help="消息内容（纯文本，或 OneBot 段数组的 JSON）")
-    p_send.add_argument("--uin", default="1000000001", help="发送账号（默认 1000000001）")
+    p_send.add_argument("--uin", default="", help="发送账号（默认用 policy 里配置的第一个号）")
     p_send.add_argument("--engine", choices=["host", "pipe", "x11", "dry-run"], default="host",
                         help="怎么发：host=操作官方客户端；x11=Xvfb 里用 xdotool（无头 Linux）")
     p_send.add_argument("--yes", action="store_true", help="真的发出去（不加只演练）")
@@ -927,7 +1045,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.set_defaults(func=_send)
 
     p_serve = sub.add_parser("serve", help="把适配器暴露成 OneBot 11 服务端（NapCat 平替）")
-    p_serve.add_argument("kind", choices=["onebot", "webui"], help="onebot = 协议端；webui = 管理控制台")
+    p_serve.add_argument("kind", choices=["onebot", "webui", "api"],
+                         help="onebot = 协议端；webui = 管理控制台；api = 给别人调用的 HTTP 接口")
     p_serve.add_argument("--type", default="ntqq-hook", help="适配器类型（见 registry）")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=6700)
@@ -938,12 +1057,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--engine", choices=["host", "pipe", "x11", "dry-run"], default="host",
                          help="webui 用哪个发送引擎（默认 host；无头 Linux 用 x11）")
     p_serve.add_argument("--password", default="", help="webui 登录口令（留空则不校验）")
-    p_serve.set_defaults(func=lambda a: _serve_webui(a) if a.kind == "webui" else _serve(a))
+    p_serve.add_argument("--cors", action="store_true", help="api：允许浏览器跨域调用")
+    p_serve.set_defaults(func=_serve_dispatch)
+
+    p_bot = sub.add_parser("bot", help="当 bot 用：new 生成模板 / run 跑 / check 体检")
+    p_bot.add_argument("action", choices=["new", "run", "check"], help="new=生成模板，run=跑脚本，check=体检")
+    p_bot.add_argument("path", nargs="?", default="", help="new 的目标文件，run 的脚本路径")
+    p_bot.add_argument("--api", default="", help="服务地址（默认读 ~/.arklink/api.json）")
+    p_bot.add_argument("--token", default="", help="服务 token（默认读 ~/.arklink/api.json）")
+    p_bot.add_argument("--since", type=int, default=None,
+                       help="run：从哪个 seq 之后开始收（默认从当前最新开始；0 = 回放缓冲）")
+    p_bot.add_argument("--max", type=int, default=0, help="run：收到多少条后退出（0=一直跑）")
+    p_bot.add_argument("--force", action="store_true", help="new：覆盖已存在的文件")
+    p_bot.set_defaults(func=_bot)
 
     p_peers = sub.add_parser("peers", help="白名单自助管理：看 / 加 / 减 / 重置（写 ~/.arklink/policy.json）")
     p_peers.add_argument("action", nargs="?", default="list",
-                         choices=["list", "allow", "deny", "reset"], help="默认 list")
-    p_peers.add_argument("values", nargs="*", help="对象名（备注 / 群名 / 群号 / QQ号）")
+                         choices=["list", "uin", "allow", "deny", "reset"], help="默认 list")
+    p_peers.add_argument("values", nargs="*", help="uin 动作给 QQ 号；其余动作给备注 / 群名 / 群号")
     p_peers.add_argument("--group", action="store_true",
                          help="allow 时同时当成群：打开群聊开关并加入群白名单")
     p_peers.add_argument("--yes", action="store_true", help="reset 需要它")
@@ -990,7 +1121,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_env = sub.add_parser("env", help="内置虚拟环境：建/启/停/推代码/删（跑 QQ 用）")
     p_env.add_argument("action",
-                       choices=["plan", "create", "up", "down", "status", "eject", "push", "destroy"],
+                       choices=["plan", "create", "up", "down", "status", "eject", "push", "destroy", "token"],
                        help="plan=算账 create=建并装 up/down=启停 eject=摘ISO push=推仓库 destroy=删")
     p_env.add_argument("--name", default="arklink", help="虚拟机名（默认 arklink）")
     p_env.add_argument("--iso", default="", help="Ubuntu Server ISO 路径（不给就先在常见目录找）")
@@ -1039,7 +1170,8 @@ def _env(args: argparse.Namespace) -> int:
             print(f"虚拟磁盘  {plan.vdi or '—'}（上限 {plan.disk_limit_gb:.0f}GB，"
                   f"实际预期 {plan.expect_gb:.1f}GB）")
             print(f"内存/CPU  {plan.ram_mb}MB / {plan.cpus} 核")
-            print(f"端口      WebUI 127.0.0.1:{plan.webui_port}   SSH 127.0.0.1:{plan.ssh_port}")
+            print(f"端口      WebUI 127.0.0.1:{plan.webui_port}   API 127.0.0.1:{plan.api_port}   "
+                  f"SSH 127.0.0.1:{plan.ssh_port}")
             for note in plan.notes:
                 print(f"  · {note}")
             for problem in plan.problems:
@@ -1126,6 +1258,24 @@ def _env(args: argparse.Namespace) -> int:
         except VBoxError as exc:
             return fail(str(exc))
         print("[env] 已摘掉安装盘并改回硬盘启动")
+        return 0
+
+    if args.action == "token":
+        password = args.password or mgr.state.extra.get("password") or ""
+        if not password:
+            return fail("需要 guest 密码：加 --password，或先跑 env create（它会把密码记进 env.json）")
+        try:
+            token = mgr.api_token(password=password)
+        except VBoxError as exc:
+            return fail(str(exc))
+        if args.json:
+            _print({"api": f"http://127.0.0.1:{plan.api_port}", "token": token})
+        else:
+            print(f"API 地址  http://127.0.0.1:{plan.api_port}")
+            print(f"token     {token}")
+            print("\n上层怎么用：")
+            print(f'  arklink bot run 你的脚本.py --api http://127.0.0.1:{plan.api_port} --token {token}')
+            print("  或写进 ~/.arklink/api.json 后直接 arklink bot check")
         return 0
 
     if args.action == "push":

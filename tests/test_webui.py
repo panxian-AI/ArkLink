@@ -18,7 +18,7 @@ from arklink.webui import WebUI
 
 @pytest.fixture()
 def ui():
-    service = SendService(SendPolicy(allowed_peers=("示例好友", "示例好友2")), DryRunEngine())
+    service = SendService(SendPolicy(allowed_uins=("10001",), allowed_peers=("测试对象", "测试对象2")), DryRunEngine())
     server = WebUI(service, port=0, token="t")
     url = server.start()
     yield server, url, service
@@ -70,23 +70,23 @@ def test_status_shape(ui):
     _status, data = _get(url, "/api/status")
     assert data["version"]
     assert data["send"]["engine"] == "dry-run"
-    assert data["limits"]["allowed_uins"] == ["1000000001"]
+    assert data["limits"]["allowed_uins"] == ["10001"]
     assert "processes" in data["qq"]
     assert data["client"] == {"supported": False}
 
 
 def test_send_dry_run_default(ui):
     _server, url, svc = ui
-    status, data = _post(url, "/api/send", {"to": "示例好友", "text": "hi"})
+    status, data = _post(url, "/api/send", {"to": "测试对象", "text": "hi"})
     assert status == 200 and data["ok"] and data["dry_run"] is True
     assert len(svc.history) == 1
 
 
 def test_send_multiple_targets_and_lines(ui):
     _server, url, svc = ui
-    status, data = _post(url, "/api/send", {"to": "示例好友，示例好友2", "text": "一\n二"})
+    status, data = _post(url, "/api/send", {"to": "测试对象，测试对象2", "text": "一\n二"})
     assert status == 200 and data["ok"]
-    assert data["targets"] == ["示例好友", "示例好友2"] and data["lines"] == 2
+    assert data["targets"] == ["测试对象", "测试对象2"] and data["lines"] == 2
     assert data["count"] == 4 and len(svc.history) == 4
 
 
@@ -99,7 +99,7 @@ def test_send_rejects_outsider(ui):
 
 def test_history_endpoint(ui):
     _server, url, _svc = ui
-    _post(url, "/api/send", {"to": "示例好友", "text": "hi"})
+    _post(url, "/api/send", {"to": "测试对象", "text": "hi"})
     _status, data = _get(url, "/api/history?limit=5")
     assert data["items"] and data["items"][0]["text"] == "hi"
     assert data["items"][0]["ts"]
@@ -127,7 +127,7 @@ def _post_status(url: str, payload: dict, token: str = ""):
 
 
 def test_password_login_sets_session():
-    service = SendService(SendPolicy(allowed_peers=("示例好友",)), DryRunEngine())
+    service = SendService(SendPolicy(allowed_uins=("10001",), allowed_peers=("测试对象",)), DryRunEngine())
     server = WebUI(service, port=0, password="s3cret")
     url = server.start()
     try:
@@ -154,7 +154,7 @@ def test_password_login_sets_session():
 
 
 def test_password_login_rejects_wrong():
-    service = SendService(SendPolicy(allowed_peers=("示例好友",)), DryRunEngine())
+    service = SendService(SendPolicy(allowed_uins=("10001",), allowed_peers=("测试对象",)), DryRunEngine())
     server = WebUI(service, port=0, password="right")
     url = server.start()
     try:
