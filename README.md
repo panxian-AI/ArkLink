@@ -44,7 +44,8 @@ ArkBot 的**协议外挂层**。四个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
-pytest tests -q                   # 166 项测试（Linux 上另有 8 项平台测试）
+pytest tests -q                   # 181 项测试（Linux 上另有 8 项平台测试）
+python -m arklink version         # 当前版本 + 新版本检测
 ```
 
 ### 接一个 Milky 协议端
@@ -93,6 +94,12 @@ python -m arklink roster --json            # 好友 + 群，验证票据是否�
 发消息故意不做（要过 A2 校验和频率风控，出问题无法定位），
 详见 [docs/扫码登录.md](docs/扫码登录.md)。
 
+### 从别的框架迁移
+
+NapCat / SnowLuma / ArkBot / NoneBot2 / Koishi / 自研脚本，各自怎么换、要做几步、
+API 有哪些差异、出事怎么回退，见 [docs/从其他框架迁移.md](docs/从其他框架迁移.md)。
+一句话：**改地址，不改代码。**
+
 ### 一键替换 NapCat（上层零改动）
 
 ```bash
@@ -135,6 +142,28 @@ python -m arklink hook --install                                  # 需要 ptrac
 如果腾讯未来在**协议层**封禁（看流量指纹/客户端完整性/账号行为），再强的协议实现也会死。
 我们的答案是**零协议改写**：流量永远由官方客户端自己产生，我们只在进程内借用它的函数；
 注入方式、旁路读取、节律策略三层递进。见 [docs/协议级封禁.md](docs/协议级封禁.md)。
+
+## 版本管理
+
+```bash
+python -m arklink version            # 当前版本，顺带检查有没有新版
+python -m arklink versions           # 所有历史版本（日期 + 更新说明）
+python -m arklink update             # 看最新版和升级命令（不执行）
+python -m arklink update --to 0.4.0  # 回退：先打印将执行的命令
+python -m arklink update --to 0.4.0 --yes   # 真的执行
+```
+
+**回退会先算清楚**：目标版本缺什么功能，直接列出来并拦住（加 `--force` 才继续）。
+检查表在 `arklink/update.py` 的 `FEATURES`，新增能力时补一行即可。
+
+**检测可以关**：
+
+```bash
+python -m arklink update --disable-check   # 永久关闭，写入 ~/.arklink/state.json
+export ARKLINK_NO_UPDATE=1                 # 临时关闭（CI 建议设上）
+```
+
+结果缓存 6 小时；离线、被关掉、CI 环境下都只是「不提示」，不影响任何命令。
 
 ## 逆向工具箱
 

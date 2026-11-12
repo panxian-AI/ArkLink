@@ -513,6 +513,120 @@ def _serve(args: argparse.Namespace) -> int:
     return asyncio.run(main())
 
 
+def _fmt_notes(text: str, limit: int = 3) -> str:
+    lines = [line.strip(" -*\t") for line in (text or "").splitlines() if line.strip()]
+    return " / ".join(lines[:limit]) if lines else ""
+
+
+def _version(args: argparse.Namespace) -> int:
+    """当前版本 + 是否有新版本。检查可以用 `update --disable-check` 关掉。"""
+    from . import update
+
+    print(f"当前版本：{update.current_version()}")
+    state = update.load_state()
+    if not update.update_check_enabled(state):
+        print("新版本检测：已关闭（arklink update --enable-check 恢复）")
+        return 0
+    status = update.check_update(force=args.force)
+    if not status.checked:
+        print(f"新版本检测：{status.reason}")
+        return 0
+    if status.available:
+        print(f"发现新版本：{status.latest}")
+        if status.notes:
+            print(f"  更新内容：{_fmt_notes(status.notes)}")
+        print("  升级：arklink update --to " + status.latest + " --yes")
+        print("  查看全部版本：arklink versions")
+    else:
+        print(f"已是最新（远端最新 {status.latest or '未知'}）")
+    return 0
+
+
+def _versions(args: argparse.Namespace) -> int:
+    from . import update
+
+    releases = update.fetch_versions()
+    if not releases:
+        print("拉不到版本列表（离线或 GitHub 不可达）")
+        return 1
+    current = update.current_version()
+    ordered = update.sort_versions([r.version for r in releases])
+    by_version = {r.version: r for r in releases}
+    print(f"{'版本':<10}{'日期':<14}{'说明'}")
+    for index, version in enumerate(ordered[: args.limit]):
+        info = by_version.get(version)
+        mark = "  ← 当前" if version == current else ""
+        date = (info.date if info else "") or "-"
+        notes = _fmt_notes(info.notes if info else "", 1)
+        print(f"{version:<10}{date:<14}{notes}{mark}")
+    print(f"\n共 {len(ordered)} 个版本。切换：arklink update --to <版本> [--yes]")
+    return 0
+
+
+def _update(args: argparse.Namespace) -> int:
+    from . import update
+
+    if args.disable_check:
+        update.set_update_check(False)
+        print("已关闭新版本检测（不再联网）")
+        return 0
+    if args.enable_check:
+        update.set_update_check(True)
+        print("已开启新版本检测")
+        return 0
+
+    current = update.current_version()
+    if not args.to:
+        status = update.check_update(force=True)
+        if not status.checked:
+            print(f"检查失败：{status.reason}")
+            return 1
+        if not status.available:
+            print(f"已是最新（{current}）")
+            return 0
+        print(f"当前 {current} → 最新 {status.latest}")
+        if status.notes:
+            print(f"更新内容：{_fmt_notes(status.notes)}")
+        print(f"执行升级：arklink update --to {status.latest} --yes")
+        return 0
+
+    target = args.to.lstrip("v")
+    try:
+        update.parse_version(target)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    used = update.detect_in_use(update.adapters_from_config(args.config))
+    compat = update.check_compatibility(target, used)
+    is_downgrade = False
+    try:
+        is_downgrade = update.parse_version(target) < update.parse_version(current)
+    except ValueError:
+        pass
+
+    print(f"{'回退' if is_downgrade else '升级'}：{current} → {target}")
+    if not compat.ok:
+        print(compat.explain(), file=sys.stderr)
+        if not args.force:
+            return 2
+        print("（已按 --force 继续）")
+
+    if not args.yes:
+        print("\n将执行：")
+        print("  " + " ".join(update.install_command(target)))
+        print("确认无误后加 --yes 执行。")
+        return 0
+
+    code, output = update.install(target, dry_run=False)
+    print(output)
+    if code != 0:
+        print(f"安装失败（exit={code}）。常见原因：没装 git、没写权限、网络不可达。", file=sys.stderr)
+        return code
+    print(f"\n已切换到 {target}，重新运行命令生效。回退到原版本：arklink update --to {current} --yes")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arklink", description="ArkLink 协议探针与逆向工具")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -590,12 +704,46 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--heartbeat", type=float, default=30.0, help="心跳间隔秒，0 = 关")
     p_serve.add_argument("--set", action="append", metavar="K=V", help="传给适配器的参数，可重复（值按 JSON 解析）")
     p_serve.set_defaults(func=_serve)
+
+    p_ver = sub.add_parser("version", help="查看当前版本与新版本")
+    p_ver.add_argument("--force", action="store_true", help="忽略缓存，强制联网检查")
+    p_ver.set_defaults(func=_version)
+
+    p_vers = sub.add_parser("versions", help="列出全部历史版本")
+    p_vers.add_argument("--limit", type=int, default=20)
+    p_vers.set_defaults(func=_versions)
+
+    p_upd = sub.add_parser("update", help="升级 / 回退到指定版本（可关闭检测）")
+    p_upd.add_argument("--to", default="", metavar="VERSION", help="目标版本，如 0.5.0")
+    p_upd.add_argument("--yes", action="store_true", help="真的执行 pip（默认只打印命令）")
+    p_upd.add_argument("--force", action="store_true", help="忽略「回退会导致功能不可用」的警告")
+    p_upd.add_argument("--config", default="bot.toml", help="用这个配置推断在用的功能")
+    p_upd.add_argument("--disable-check", action="store_true", help="关闭新版本检测")
+    p_upd.add_argument("--enable-check", action="store_true", help="开启新版本检测")
+    p_upd.set_defaults(func=_update)
+
     return parser
+
+
+def _maybe_notice() -> None:
+    """非侵入式提示有新版本。被关掉 / 离线 / CI 都不打扰。"""
+    if os.environ.get("CI") or os.environ.get("ARKLINK_NO_UPDATE"):
+        return
+    try:
+        from . import update
+
+        status = update.check_update()
+        if status.checked and status.available:
+            print(f"[arklink] 有新版本 {status.latest}（当前 {status.current}）：arklink update", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "cmd", "") not in ("version", "versions", "update"):
+        _maybe_notice()
     return int(args.func(args))
 
 

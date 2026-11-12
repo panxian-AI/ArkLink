@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arklink"
-version = "0.5.0"
+version = "0.6.0"
 description = "ArkBot 的协议外挂层：Milky / Satori 通道 + QQ NT 原生协议逆向工具箱"
 readme = "README.md"
 requires-python = ">=3.11"
