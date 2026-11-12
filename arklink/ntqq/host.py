@@ -41,6 +41,9 @@ IS_WINDOWS = sys.platform == "win32"
 WINDOW_CLASSES = ("Chrome_WidgetWin_1", "TXGuiFoundation")
 
 class PROCESSENTRY32W(ctypes.Structure):
+    """Windows 结构体字段一律用定宽类型：`c_long` 在 Linux 上是 8 字节，
+    会让尺寸断言在 CI（Linux）上莫名失败。"""
+
     _fields_ = [
         ("dwSize", ctypes.c_uint32),
         ("cntUsage", ctypes.c_uint32),
@@ -49,7 +52,7 @@ class PROCESSENTRY32W(ctypes.Structure):
         ("th32ModuleID", ctypes.c_uint32),
         ("cntThreads", ctypes.c_uint32),
         ("th32ParentProcessID", ctypes.c_uint32),
-        ("pcPriClassBase", ctypes.c_long),
+        ("pcPriClassBase", ctypes.c_int32),
         ("dwFlags", ctypes.c_uint32),
         ("szExeFile", ctypes.c_wchar * 260),
     ]
@@ -67,8 +70,8 @@ class KEYBDINPUT(ctypes.Structure):
 
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [
-        ("dx", ctypes.c_long),
-        ("dy", ctypes.c_long),
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
         ("mouseData", ctypes.c_uint32),
         ("dwFlags", ctypes.c_uint32),
         ("time", ctypes.c_uint32),
