@@ -48,6 +48,7 @@ pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
 pytest tests -q                   # 181 项测试（Linux 上另有 8 项平台测试）
 python -m arklink version         # 当前版本 + 新版本检测
+python -m arklink doctor          # 迁移体检：环境/模块/进程/管道/服务端/配置
 ```
 
 ### 接一个 Milky 协议端
@@ -144,6 +145,16 @@ python -m arklink hook --install                                  # 需要 ptrac
 如果腾讯未来在**协议层**封禁（看流量指纹/客户端完整性/账号行为），再强的协议实现也会死。
 我们的答案是**零协议改写**：流量永远由官方客户端自己产生，我们只在进程内借用它的函数；
 注入方式、旁路读取、节律策略三层递进。见 [docs/协议级封禁.md](docs/协议级封禁.md)。
+
+## 迁移体检与验收
+
+```bash
+python -m arklink doctor            # 自动 10 项：环境、hook 模块、QQ 进程、管道、服务端、配置
+```
+
+自动检查只证明「管道通」；收/发消息和异常场景按
+[docs/迁移验收清单.md](docs/迁移验收清单.md) 手动过（A 基础设施 / B 收消息 /
+C 发消息 / D 会话与异常 / E 上层框架，每项带排查方向）。
 
 ## 版本管理
 

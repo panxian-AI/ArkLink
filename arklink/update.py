@@ -144,6 +144,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature("onebot-serve", "0.4.0", "独立 OneBot 11 服务端（serve onebot）"),
     Feature("hook-linux", "0.5.0", "Linux 注入通道（ptrace + Unix socket）"),
     Feature("update", "0.6.0", "版本检测 / 更新 / 回退"),
+    Feature("doctor", "0.7.0", "迁移体检（arklink doctor）"),
 )
 
 _FEATURE_BY_KEY = {f.key: f for f in FEATURES}

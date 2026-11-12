@@ -513,6 +513,23 @@ def _serve(args: argparse.Namespace) -> int:
     return asyncio.run(main())
 
 
+def _doctor(args: argparse.Namespace) -> int:
+    """迁移后体检：环境 / 模块 / 进程 / 管道 / 服务端 / 配置 一次跑完。"""
+    from . import doctor
+
+    report = doctor.run_checks(
+        config=args.config, offline=args.offline, with_server=not args.no_server
+    )
+    print(report.render())
+    print()
+    print(doctor.summary(report))
+    if report.failed:
+        print("\n有失败项，先按上面的建议处理。用户操作层面的逐项验证见 docs/迁移验收清单.md")
+        return 1
+    print("\n自动检查通过。接下来手动验证收发消息（清单见 docs/迁移验收清单.md）")
+    return 0
+
+
 def _fmt_notes(text: str, limit: int = 3) -> str:
     lines = [line.strip(" -*\t") for line in (text or "").splitlines() if line.strip()]
     return " / ".join(lines[:limit]) if lines else ""
@@ -717,6 +734,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--heartbeat", type=float, default=30.0, help="心跳间隔秒，0 = 关")
     p_serve.add_argument("--set", action="append", metavar="K=V", help="传给适配器的参数，可重复（值按 JSON 解析）")
     p_serve.set_defaults(func=_serve)
+
+    p_doc = sub.add_parser("doctor", help="体检：环境 / 模块 / 进程 / 管道 / 服务端 / 配置")
+    p_doc.add_argument("--config", default="bot.toml", help="ArkBot 配置路径")
+    p_doc.add_argument("--offline", action="store_true", help="不检查新版本")
+    p_doc.add_argument("--no-server", action="store_true", help="跳过 OneBot 服务端自检（不起临时端口）")
+    p_doc.set_defaults(func=_doctor)
 
     p_ver = sub.add_parser("version", help="查看当前版本与新版本")
     p_ver.add_argument("--project", choices=["arklink", "arkbot"], default="arklink",
