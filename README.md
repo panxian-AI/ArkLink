@@ -6,7 +6,7 @@ ArkBot 的**协议外挂层**。三个通道、一套契约：
 |------|------|------|
 | `milky` | Milky 1.3（NapCat / Lagrange / Acidify / LLOneBot） | ✅ 可用 |
 | `satori` | Satori v1（Koishi / Chronocat，顺带接上 Telegram/Discord） | ✅ 可用 |
-| `ntqq-native` | QQ NT 原生 SSO 协议（TEA / 封包 / qsign） | 🧪 研究态，不登录 |
+| `ntqq-native` | QQ NT 原生 SSO：扫码登录 / 只读花名册 / 收推送 | 🟡 只读可用，不发消息 |
 | `ntqq-client` | 操作**已登录的官方客户端**（Win32 键鼠，只发文本） | ⚠️ 可用，最后一条通知腿 |
 
 它不是又一个 bot 框架。业务插件写在 [ArkBot](https://github.com/panxian-AI/ArkBot) 里，
@@ -42,8 +42,8 @@ ArkBot 的**协议外挂层**。三个通道、一套契约：
 ```bash
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
-python -m arklink selftest        # 8 项自检，不联网
-pytest tests -q                   # 94 项测试
+python -m arklink selftest        # 13 项自检，不联网
+pytest tests -q                   # 133 项测试
 ```
 
 ### 接一个 Milky 协议端
@@ -80,6 +80,18 @@ python -m arklink probe-satori --api http://127.0.0.1:5140 --token t
 
 打印**翻译后的 OneBot 事件**，不启动插件、不回消息 —— 接新协议时最快的确认方式。
 
+### 原生协议：扫码 → 只读 → 收推送
+
+```bash
+python -m arklink login --dry-run          # 只打印 0x31 申请二维码的字节，对拍用
+python -m arklink login --out qr.png       # 真机扫码，票据落到 data/ntqq.json
+python -m arklink roster --json            # 好友 + 群，验证票据是否真的有效
+```
+
+这一步的意义：**能扫码说明 ECDH/TEA/封包全对，能拉花名册说明票据与 OIDB 全对。**
+发消息故意不做（要过 A2 校验和频率风控，出问题无法定位），
+详见 [docs/扫码登录.md](docs/扫码登录.md)。
+
 ## 逆向工具箱
 
 ```bash
@@ -94,12 +106,18 @@ python -m arklink pb --hex 089601120361726b                  # 把 protobuf 拆�
 | `arklink/ntqq/sso.py` | SSO 封包编解码（magic/length/seq/cmd/uin/body/tail），处理粘包 |
 | `arklink/ntqq/pb.py` | protobuf 线格式编解码 + 人类可读 dump |
 | `arklink/ntqq/qsign.py` | 本地签名服务客户端（GET/POST 双路） |
-| `arklink/ntqq/native.py` | 拼包→加密→发→收→解密→解包 的完整管线（`selftest()` 有单测） |
+| `arklink/ntqq/ecdh.py` | secp192k1 密钥协商（纯 Python，含阶/曲线自洽测试） |
+| `arklink/ntqq/code2d.py` | `wtlogin.trans_emp`：0x31 申请二维码 / 0x12 轮询 / 0x13 换票据 |
+| `arklink/ntqq/session.py` | 扫码状态机 + keystore 落盘（0600），支持票据恢复 |
+| `arklink/ntqq/ntframe.py` | NT 帧（protocol 12/13，服务名字符串）—— 真正发 OIDB 的那层 |
+| `arklink/ntqq/roster.py` | 好友（0xfd4，cookie 翻页）/ 群（0xfe5）列表 |
+| `arklink/ntqq/push.py` | 推送 `MsgPush` → OneBot 11 事件（段/撤回，未知段不丢事件） |
+| `arklink/ntqq/native.py` | 把上面几件串起来：拼包→加密→发→收→解密→解包，登录/只读/收推送 |
 | `arklink/ntqq/host.py` | 操作已登录的官方客户端：进程/窗口探测、剪贴板粘贴、按键注入 |
 
-`NativeQQAdapter` 挂载后**永远不健康**：`call_api` 返回 `1404`，框架自动降级，
-不会抢占总通道。登录握手（`wtlogin`）、设备指纹、ECDH 密钥协商尚未实现，
-差距清单与优先级见 [docs/协议逆向分析.md](docs/协议逆向分析.md)。
+`ntqq-native` 是**只读通道**：能扫码、能拉好友/群、能收推送；`send_*` 一律返回 `1404`，
+框架自动换通道。设备指纹与发送侧风控仍未做，差距清单见
+[docs/协议逆向分析.md](docs/协议逆向分析.md)，上手步骤见 [docs/扫码登录.md](docs/扫码登录.md)。
 
 ## 目录
 
@@ -111,7 +129,7 @@ arklink/
 ├── satori.py      Satori v1：/v1/* + WS opcode，XML 内容编解码
 ├── registry.py    type 名 → 工厂
 ├── __main__.py    probe / decode / pb / selftest
-└── ntqq/          TEA · SSO · protobuf · qsign · native · host
+└── ntqq/          TEA · SSO · pb · ecdh · code2d · session · roster · push · ntframe · host
 docs/
 ├── 协议逆向分析.md  三层结构、官方开放协议、NTQQ 逆向、对拍清单
 ├── 挂载到ArkBot.md  三种挂载方式、契约、双通道配置、自己加协议
@@ -124,6 +142,10 @@ tests/
 ├── test_ntqq_tea.py  TEA 向量与往返
 ├── test_ntqq_sso.py  SSO 布局/protobuf/管线
 ├── test_ntqq_host.py 客户端通道：结构体/热键/纯文本过滤
+├── test_ntqq_code2d.py 二维码封包、状态机、票据落盘
+├── test_ntqq_login.py  ECDH/NT 帧/推送入队
+├── test_ntqq_roster.py 好友群列表、OIDB 信封、cookie 翻页
+├── test_ntqq_push.py   推送 → OneBot 事件映射
 └── test_mount.py     ★ 真实 ArkBot + 假协议端 的端到端挂载
 ```
 
@@ -131,6 +153,7 @@ tests/
 
 | 文档 | 内容 |
 |------|------|
+| [docs/扫码登录.md](docs/扫码登录.md) | 三步封包、状态码、命令用法、推送映射、未验证清单与校准方法 |
 | [docs/协议逆向分析.md](docs/协议逆向分析.md) | 协议分层、为什么影分身容易被踢、官方开放协议能力、NTQQ 封包/TEA/qsign、对拍清单 |
 | [docs/挂载到ArkBot.md](docs/挂载到ArkBot.md) | 三种挂载方式、适配器契约、双通道、加新协议 |
 | [docs/Milky接入.md](docs/Milky接入.md) | Milky 配置、映射表、协议差异、排障 |
@@ -138,7 +161,7 @@ tests/
 
 ## 合规与安全
 
-- 本项目用于**协议研究与自有账号实验**。模拟登录通常违反 QQ 用户协议，
+- 本项目用于**协议研究与自有账号实验**（当前只做只读：登录、拉列表、收推送）。模拟登录通常违反 QQ 用户协议，
   由此产生的封号、冻结风险由使用者承担；
 - 不提供任何绕过风控、批量注册/登录、营销群发的能力；
 - Milky / Satori 协议端**不要监听公网**：它们没有 TLS，只适合 `127.0.0.1` 或内网；

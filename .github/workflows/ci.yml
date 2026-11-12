@@ -37,4 +37,6 @@ jobs:
       - name: CLI 冒烟
         run: |
           python -m arklink pb --hex 089601120361726b
+          python -m arklink login --dry-run | head -3
+          python -m arklink roster --dry-run | head -2
           python -m arklink --help
