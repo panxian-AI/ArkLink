@@ -165,7 +165,8 @@ def test_cli_version_reports_disabled(state_file, monkeypatch, capsys):
     update.set_update_check(False, state_file)
     assert main(["version"]) == 0
     out = capsys.readouterr().out
-    assert "当前版本" in out
+    assert "ArkLink" in out
+    assert "0.6.0" in out or update.current_version() in out
     assert "已关闭" in out
 
 
@@ -180,3 +181,63 @@ def test_notice_skipped_in_ci(monkeypatch, capsys):
     monkeypatch.setattr(update, "check_update", boom)
     _maybe_notice()
     assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------- 双仓库
+def test_repo_of_supports_both_projects():
+    assert update.repo_of("arklink") == "panxian-AI/ArkLink"
+    assert update.repo_of("arkbot") == "panxian-AI/ArkBot"
+    with pytest.raises(KeyError):
+        update.repo_of("nope")
+
+
+def test_install_command_targets_arkbot_repo():
+    command = update.install_command("0.3.0", project="arkbot")
+    assert any("ArkBot@v0.3.0" in part for part in command)
+
+
+def test_arkbot_compat_blocks_rollback_to_0_3():
+    used = {"onebot-compat", "adapter-loader"}
+    compat = update.check_compatibility("0.3.0", used, project="arkbot")
+    assert not compat.ok
+    assert {f.since for f in compat.missing} == {"0.4.0"}
+    assert "OneBot 11 兼容层" in compat.explain()
+
+
+def test_arkbot_compat_allows_same_version():
+    compat = update.check_compatibility("0.4.0", {"onebot-compat"}, project="arkbot")
+    assert compat.ok
+
+
+def test_detect_in_use_arkbot_reads_compat_section():
+    used = update.detect_in_use(["ntqq-hook"], project="arkbot", config_text="[compat]\nenabled = true\n")
+    assert "onebot-compat" in used
+    assert "adapter-loader" in used
+
+
+def test_state_keys_are_namespaced_per_project(state_file, monkeypatch):
+    update.save_state(
+        {"update_check": True, "checked_at": 9_999_999_999, "latest": {"version": "9.9.9"}},
+        state_file,
+    )
+    monkeypatch.setattr(update, "fetch_versions", lambda *a, **k: [])
+    # arklink 走缓存；arkbot 没有缓存，会去拉（这里被替换成空列表）→ 不命中缓存
+    arklink_status = update.check_update(state_file=state_file)
+    assert arklink_status.available and arklink_status.reason == "缓存"
+    arkbot_status = update.check_update(state_file=state_file, project="arkbot", current="0.4.0")
+    assert arkbot_status.reason != "缓存"
+
+
+def test_cli_update_blocks_arkbot_rollback(tmp_path, state_file, monkeypatch, capsys):
+    from arklink.__main__ import main
+
+    monkeypatch.setenv("ARKLINK_STATE", state_file)
+    monkeypatch.setenv("ARKLINK_NO_UPDATE", "1")
+    config = tmp_path / "bot.toml"
+    config.write_text('[compat]\nenabled = true\n\n[[adapters]]\ntype = "ntqq-hook"\n', encoding="utf-8")
+
+    code = main(["update", "--project", "arkbot", "--to", "0.3.0", "--config", str(config)])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "兼容层" in captured.err
+    assert "ArkBot" in captured.out

@@ -153,8 +153,16 @@ python -m arklink update --to 0.4.0  # 回退：先打印将执行的命令
 python -m arklink update --to 0.4.0 --yes   # 真的执行
 ```
 
+**两个仓库分别管**（`--project arkbot` 切到框架本体）：
+
+```bash
+python -m arklink version --project arkbot            # ArkBot 自己的版本
+python -m arklink versions --project arkbot
+python -m arklink update --project arkbot --to 0.3.0 --config bot.toml
+```
+
 **回退会先算清楚**：目标版本缺什么功能，直接列出来并拦住（加 `--force` 才继续）。
-检查表在 `arklink/update.py` 的 `FEATURES`，新增能力时补一行即可。
+检查表在 `arklink/update.py` 的 `FEATURES` / `BOT_FEATURES`，新增能力时补一行即可。
 
 **检测可以关**：
 

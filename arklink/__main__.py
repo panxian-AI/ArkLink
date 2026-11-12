@@ -522,12 +522,16 @@ def _version(args: argparse.Namespace) -> int:
     """当前版本 + 是否有新版本。检查可以用 `update --disable-check` 关掉。"""
     from . import update
 
-    print(f"当前版本：{update.current_version()}")
+    project = args.project or "arklink"
+    installed = update.project_version(project)
+    print(f"{update.PROJECT_TITLES[project]}：{installed or '未安装'}")
+    if project == "arklink" and not installed:
+        installed = update.current_version()
     state = update.load_state()
     if not update.update_check_enabled(state):
         print("新版本检测：已关闭（arklink update --enable-check 恢复）")
         return 0
-    status = update.check_update(force=args.force)
+    status = update.check_update(force=args.force, project=project, current=installed or "0.0.0")
     if not status.checked:
         print(f"新版本检测：{status.reason}")
         return 0
@@ -535,7 +539,8 @@ def _version(args: argparse.Namespace) -> int:
         print(f"发现新版本：{status.latest}")
         if status.notes:
             print(f"  更新内容：{_fmt_notes(status.notes)}")
-        print("  升级：arklink update --to " + status.latest + " --yes")
+        flag = "" if project == "arklink" else f" --project {project}"
+        print(f"  升级：arklink update --to {status.latest}{flag} --yes")
         print("  查看全部版本：arklink versions")
     else:
         print(f"已是最新（远端最新 {status.latest or '未知'}）")
@@ -545,11 +550,13 @@ def _version(args: argparse.Namespace) -> int:
 def _versions(args: argparse.Namespace) -> int:
     from . import update
 
-    releases = update.fetch_versions()
+    project = args.project or "arklink"
+    releases = update.fetch_versions(project=project)
     if not releases:
         print("拉不到版本列表（离线或 GitHub 不可达）")
         return 1
-    current = update.current_version()
+    current = update.project_version(project) or update.current_version()
+    print(f"{update.PROJECT_TITLES[project]}")
     ordered = update.sort_versions([r.version for r in releases])
     by_version = {r.version: r for r in releases}
     print(f"{'版本':<10}{'日期':<14}{'说明'}")
@@ -575,9 +582,10 @@ def _update(args: argparse.Namespace) -> int:
         print("已开启新版本检测")
         return 0
 
-    current = update.current_version()
+    project = args.project or "arklink"
+    current = update.project_version(project) or update.current_version()
     if not args.to:
-        status = update.check_update(force=True)
+        status = update.check_update(force=True, project=project, current=current)
         if not status.checked:
             print(f"检查失败：{status.reason}")
             return 1
@@ -597,15 +605,19 @@ def _update(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    used = update.detect_in_use(update.adapters_from_config(args.config))
-    compat = update.check_compatibility(target, used)
+    used = update.detect_in_use(
+        update.adapters_from_config(args.config),
+        project=project,
+        config_text=update.config_text_of(args.config),
+    )
+    compat = update.check_compatibility(target, used, project=project)
     is_downgrade = False
     try:
         is_downgrade = update.parse_version(target) < update.parse_version(current)
     except ValueError:
         pass
 
-    print(f"{'回退' if is_downgrade else '升级'}：{current} → {target}")
+    print(f"{update.PROJECT_TITLES[project]} {'回退' if is_downgrade else '升级'}：{current} → {target}")
     if not compat.ok:
         print(compat.explain(), file=sys.stderr)
         if not args.force:
@@ -614,16 +626,17 @@ def _update(args: argparse.Namespace) -> int:
 
     if not args.yes:
         print("\n将执行：")
-        print("  " + " ".join(update.install_command(target)))
+        print("  " + " ".join(update.install_command(target, project=project)))
         print("确认无误后加 --yes 执行。")
         return 0
 
-    code, output = update.install(target, dry_run=False)
+    code, output = update.install(target, dry_run=False, project=project)
     print(output)
     if code != 0:
         print(f"安装失败（exit={code}）。常见原因：没装 git、没写权限、网络不可达。", file=sys.stderr)
         return code
-    print(f"\n已切换到 {target}，重新运行命令生效。回退到原版本：arklink update --to {current} --yes")
+    flag = "" if project == "arklink" else f" --project {project}"
+    print(f"\n已切换到 {target}，重新运行命令生效。回退到原版本：arklink update --to {current}{flag} --yes")
     return 0
 
 
@@ -706,14 +719,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.set_defaults(func=_serve)
 
     p_ver = sub.add_parser("version", help="查看当前版本与新版本")
+    p_ver.add_argument("--project", choices=["arklink", "arkbot"], default="arklink",
+                       help="查哪个仓库（默认 arklink）")
     p_ver.add_argument("--force", action="store_true", help="忽略缓存，强制联网检查")
     p_ver.set_defaults(func=_version)
 
     p_vers = sub.add_parser("versions", help="列出全部历史版本")
+    p_vers.add_argument("--project", choices=["arklink", "arkbot"], default="arklink",
+                        help="列哪个仓库（默认 arklink）")
     p_vers.add_argument("--limit", type=int, default=20)
     p_vers.set_defaults(func=_versions)
 
     p_upd = sub.add_parser("update", help="升级 / 回退到指定版本（可关闭检测）")
+    p_upd.add_argument("--project", choices=["arklink", "arkbot"], default="arklink",
+                       help="操作哪个仓库（默认 arklink）")
     p_upd.add_argument("--to", default="", metavar="VERSION", help="目标版本，如 0.5.0")
     p_upd.add_argument("--yes", action="store_true", help="真的执行 pip（默认只打印命令）")
     p_upd.add_argument("--force", action="store_true", help="忽略「回退会导致功能不可用」的警告")

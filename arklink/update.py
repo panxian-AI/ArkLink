@@ -24,9 +24,32 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 REPO = "panxian-AI/ArkLink"
-TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=100"
-RELEASES_URL = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
 GIT_URL = f"git+https://github.com/{REPO}"
+
+#: 两个仓库各管一段：ArkBot 是框架本体（插件 / 内核 / 兼容层），
+#: ArkLink 是协议外挂层（连 QQ 的通道）。升级回退要分别针对，不能混。
+PROJECTS: dict[str, str] = {
+    "arklink": "panxian-AI/ArkLink",
+    "arkbot": "panxian-AI/ArkBot",
+}
+PROJECT_TITLES: dict[str, str] = {
+    "arklink": "ArkLink（协议外挂层）",
+    "arkbot": "ArkBot（框架内核）",
+}
+
+
+def repo_of(project: str = "arklink") -> str:
+    if project not in PROJECTS:
+        raise KeyError(f"未知仓库 {project!r}，可选：{', '.join(PROJECTS)}")
+    return PROJECTS[project]
+
+
+def tags_url(project: str = "arklink") -> str:
+    return f"https://api.github.com/repos/{repo_of(project)}/tags?per_page=100"
+
+
+def releases_url(project: str = "arklink") -> str:
+    return f"https://api.github.com/repos/{repo_of(project)}/releases?per_page=100"
 
 #: 缓存多久（秒）。离线环境下不会每次都卡在超时上。
 CACHE_TTL = 6 * 3600
@@ -125,6 +148,21 @@ FEATURES: tuple[Feature, ...] = (
 
 _FEATURE_BY_KEY = {f.key: f for f in FEATURES}
 
+#: ArkBot 的能力表。写得保守：只列「确实某版本才有」的东西，宁可漏不可编。
+BOT_FEATURES: tuple[Feature, ...] = (
+    Feature("official-qq", "0.1.0", "QQ 官方 Bot 通道"),
+    Feature("outbox", "0.2.0", "离线发件箱（落盘补发）"),
+    Feature("adapter-loader", "0.4.0", "适配器加载器（entry point / 点分路径）"),
+    Feature("onebot-compat", "0.4.0", "OneBot 11 兼容层（对外扮演协议端）"),
+    Feature("arkbot2", "0.4.0", "ArkBot NG 微内核"),
+)
+
+_BOT_FEATURE_BY_KEY = {f.key: f for f in BOT_FEATURES}
+
+
+def features_of(project: str = "arklink") -> tuple[Feature, ...]:
+    return FEATURES if project == "arklink" else BOT_FEATURES
+
 
 @dataclass
 class Compatibility:
@@ -150,11 +188,18 @@ class Compatibility:
         return "\n".join(lines)
 
 
-def detect_in_use(config_adapters: Iterable[str] = (), platform: str | None = None) -> set[str]:
+def detect_in_use(
+    config_adapters: Iterable[str] = (),
+    platform: str | None = None,
+    project: str = "arklink",
+    config_text: str = "",
+) -> set[str]:
     """推断「你现在实际用到了哪些能力」。
 
-    只做保守推断：配置里出现的适配器类型 + 当前平台 + 是否装了 OneBot 服务端模块。
+    只做保守推断：配置里出现的适配器类型 + 当前平台 + 当前安装里有的模块。
     """
+    if project == "arkbot":
+        return _detect_in_use_arkbot(config_adapters, config_text)
     used: set[str] = set()
     platform = platform or sys.platform
     for name in config_adapters:
@@ -178,6 +223,34 @@ def detect_in_use(config_adapters: Iterable[str] = (), platform: str | None = No
     return used
 
 
+def _detect_in_use_arkbot(adapters: Iterable[str], config_text: str) -> set[str]:
+    used: set[str] = {"official-qq"}
+    for name in adapters:
+        name = str(name).strip()
+        if name in ("official_qq", "official-qq"):
+            used.add("official-qq")
+        elif name in ("onebot11", "ntqq-hook", "milky", "satori", "ntqq-native"):
+            # 这些都要靠 0.4.0 的加载器 + 兼容层
+            used.add("adapter-loader")
+    if "[compat]" in (config_text or ""):
+        used.add("onebot-compat")
+    try:
+        import arkbot2  # noqa: F401
+
+        used.add("arkbot2")
+    except Exception:
+        pass
+    return used
+
+
+def config_text_of(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
 def adapters_from_config(path: str) -> list[str]:
     """从 bot.toml / arklink.toml 里抠出 `type = "..."`（不引 tomllib 之外的依赖）。"""
     if not path or not os.path.isfile(path):
@@ -199,15 +272,16 @@ def adapters_from_config(path: str) -> list[str]:
     return out
 
 
-def check_compatibility(target: str, used: Iterable[str]) -> Compatibility:
+def check_compatibility(target: str, used: Iterable[str], project: str = "arklink") -> Compatibility:
     result = Compatibility(target=target)
     try:
         target_tuple = parse_version(target)
     except ValueError:
         result.notes.append(f"目标版本 {target!r} 无法解析，跳过功能检查")
         return result
+    table = _FEATURE_BY_KEY if project == "arklink" else _BOT_FEATURE_BY_KEY
     for key in used:
-        feature = _FEATURE_BY_KEY.get(key)
+        feature = table.get(key)
         if feature is None:
             continue
         if target_tuple < parse_version(feature.since):
@@ -231,10 +305,10 @@ class ReleaseInfo:
     notes: str = ""
 
 
-def fetch_versions(timeout: float = TIMEOUT) -> list[ReleaseInfo]:
+def fetch_versions(timeout: float = TIMEOUT, project: str = "arklink") -> list[ReleaseInfo]:
     """拉远端所有版本（先 releases，拿不到再退回 tags）。失败返回空列表，不抛。"""
     try:
-        releases = _github_json(RELEASES_URL, timeout)
+        releases = _github_json(releases_url(project), timeout)
     except Exception:
         releases = []
     out: list[ReleaseInfo] = []
@@ -253,7 +327,7 @@ def fetch_versions(timeout: float = TIMEOUT) -> list[ReleaseInfo]:
     if out:
         return out
     try:
-        tags = _github_json(TAGS_URL, timeout)
+        tags = _github_json(tags_url(project), timeout)
     except Exception:
         return []
     for item in tags if isinstance(tags, list) else []:
@@ -299,15 +373,17 @@ def check_update(
     force: bool = False,
     state_file: str | None = None,
     timeout: float = TIMEOUT,
+    project: str = "arklink",
+    current: str | None = None,
 ) -> UpdateStatus:
     """检查新版本。被关掉或离线都只是「不检查」，不报错、不阻塞。"""
-    current = current_version()
+    current = current or (current_version() if project == "arklink" else project_version(project))
     state = load_state(state_file)
     if not update_check_enabled(state):
         return UpdateStatus(current=current, reason="更新检查已关闭（arklink update --enable-check 可恢复）")
 
-    cached = state.get("latest") or {}
-    fresh = time.time() - float(state.get("checked_at") or 0) < CACHE_TTL
+    cached = state.get(_key(project, "latest")) or {}
+    fresh = time.time() - float(state.get(_key(project, "checked_at")) or 0) < CACHE_TTL
     if not force and fresh and isinstance(cached, dict) and cached.get("version"):
         latest = str(cached["version"])
         return UpdateStatus(
@@ -319,17 +395,17 @@ def check_update(
             reason="缓存",
         )
 
-    releases = fetch_versions(timeout)
+    releases = fetch_versions(timeout, project)
     latest_info = latest_release(releases)
     if latest_info is None:
-        state["checked_at"] = time.time()
-        state["last_error"] = "拉取版本列表失败（离线或 GitHub 不可达）"
+        state[_key(project, "checked_at")] = time.time()
+        state[_key(project, "last_error")] = "拉取版本列表失败（离线或 GitHub 不可达）"
         save_state(state, state_file)
-        return UpdateStatus(current=current, reason=state["last_error"], versions=releases)
+        return UpdateStatus(current=current, reason=state[_key(project, "last_error")], versions=releases)
 
-    state["checked_at"] = time.time()
-    state["latest"] = {"version": latest_info.version, "notes": latest_info.notes[:2000]}
-    state.pop("last_error", None)
+    state[_key(project, "checked_at")] = time.time()
+    state[_key(project, "latest")] = {"version": latest_info.version, "notes": latest_info.notes[:2000]}
+    state.pop(_key(project, "last_error"), None)
     save_state(state, state_file)
     return UpdateStatus(
         current=current,
@@ -341,6 +417,23 @@ def check_update(
     )
 
 
+def _key(project: str, name: str) -> str:
+    """arklink 用扁平键（兼容旧状态文件），其他仓库加前缀。"""
+    return name if project == "arklink" else f"{project}:{name}"
+
+
+def project_version(project: str = "arklink") -> str:
+    """另一个仓库的已安装版本（没装就是空串）。"""
+    if project == "arklink":
+        return current_version()
+    module = "arkbot" if project == "arkbot" else project
+    try:
+        mod = __import__(module)
+        return str(getattr(mod, "__version__", "") or "")
+    except Exception:
+        return ""
+
+
 def _newer(candidate: str, current: str) -> bool:
     try:
         return parse_version(candidate) > parse_version(current)
@@ -349,14 +442,17 @@ def _newer(candidate: str, current: str) -> bool:
 
 
 # ---------------------------------------------------------------- 安装
-def install_command(version: str, python: str | None = None) -> list[str]:
+def install_command(version: str, python: str | None = None, project: str = "arklink") -> list[str]:
     exe = python or sys.executable
-    return [exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", f"{GIT_URL}@v{version}"]
+    url = f"git+https://github.com/{repo_of(project)}"
+    return [exe, "-m", "pip", "install", "--upgrade", "--force-reinstall", f"{url}@v{version}"]
 
 
-def install(version: str, dry_run: bool = True, python: str | None = None) -> tuple[int, str]:
+def install(
+    version: str, dry_run: bool = True, python: str | None = None, project: str = "arklink"
+) -> tuple[int, str]:
     """切换版本。默认只打印命令（dry_run），返回 (returncode, 输出)。"""
-    command = install_command(version, python)
+    command = install_command(version, python, project)
     if dry_run:
         return 0, " ".join(command)
     proc = subprocess.run(command, capture_output=True, text=True)
