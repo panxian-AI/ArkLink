@@ -194,3 +194,67 @@ Linux 端的注入（`ptrace + dlopen`）代码已经在仓库里，等 `pipe` �
    或加 `--no-sandbox`；解包后入口在 `squashfs-root/qq`。
 8. **不要装桌面环境**：GNOME/KDE 会带来自己的窗口管理器和一堆守护进程，
    在 Xvfb 里既费内存又可能抢走焦点，反而更容易出错。
+
+## 八、资源账单：每种「虚拟环境」到底吃多少盘
+
+先看本机余量（实测）：**C: 剩 20.3GB、D: 剩 87.3GB、E: 剩 335.7GB、物理内存 15GB**。
+原则很简单：**虚拟机镜像一律放 E: 或 D:，C: 一个字节都不占**（只多 VirtualBox 本体 ~300MB）。
+
+现有参照物（实测）：Windows 版 QQ 装完 **1.3GB**，用户数据（聊天记录/图片缓存）
+**2.5GB**——后者会持续增长，是真正需要防的那个数字。
+
+| 形态 | 宿主磁盘增量（稳态） | 峰值（含安装包） | 内存常驻 | 需重启 | 要重新登录 QQ |
+|------|-------------------|----------------|---------|-------|--------------|
+| **VirtualBox + Ubuntu Server 24.04** | **3.4GB**（VDI 3.1 + 本体 0.3） | 6.0GB（+ISO 2.6） | 2.0GB（VM 分配值） | 否 | 是（一次扫码） |
+| **WSL2 + Ubuntu 24.04** | **2.3GB**（VHDX 稀疏） | 3.0GB | 2.0GB（`.wslconfig` 限） | **是**（开 Hyper-V 平台） | 是（一次扫码） |
+| **Windows 独立会话** | **1.5GB**（新 profile 的 QQ 数据） | 1.5GB | **0**（QQ 本来就在跑） | 否 | 是（换用户=换数据目录） |
+| Windows 虚拟机（Win11 guest） | 22GB+ | 26GB+ | 4.0GB | 否 | 是 |
+| 同会话 UI 通道（现状） | 0 | 0 | 0 | 否 | 不需要 |
+
+### 3.4GB 是怎么算出来的（guest 内明细）
+
+| 项 | 大小 | 能否省 |
+|---|---|---|
+| Ubuntu Server 24.04 最小安装 | 2.0–2.4GB | 换 Ubuntu Base rootfs 可到 ~0.4GB，但内核要自己配 |
+| QQ Linux 版（deb 装完） | ~600MB | 不能 |
+| 依赖（Qt/Chromium 运行库、字体、Xvfb、openbox、xdotool） | ~450MB | 去掉 `--no-install-recommends` 之外的可选项，已基本到底 |
+| Python venv + Arklink | ~120MB | 可省（不用 venv 直接装系统 python，-100MB） |
+| 用户数据初值 | ~50MB | 会随聊天增长，见下 |
+| **合计** | **≈3.4GB** | |
+
+### 五条把账单压住的做法
+
+```bash
+# 1) 镜像放 E:，创建时就把上限钉死 8GB（动态分配，实际只占 3.x GB）
+VBoxManage createmedium disk --filename "E:/vm/arklink/arklink.vdi" --size 8192 --variant Standard
+# 2) 装完立刻卸掉 ISO（省 2.6GB）
+VBoxManage storageattach arklink --storagectl SATA --port 1 --device 0 --medium none
+# 3) 关 swap（宿主机 15GB 内存，guest 2GB 不需要交换，省 1GB）
+swapoff -a && sed -i '/swap/s/^/#/' /etc/fstab && rm -f /swap.img
+# 4) 清 apt 缓存与索引（省 ~250MB）
+apt-get clean && rm -rf /var/lib/apt/lists/*
+# 5) 删 snapd（Ubuntu Server 默认带，占 ~300MB，QQ 用不到）
+apt-get purge -y snapd && rm -rf /var/cache/snapd
+```
+
+QQ 自己的缓存才是长期风险：设置里把「图片/视频自动下载」关掉、缓存上限设 500MB，
+并定期清 `~/.config/QQ/nt_data/{Pic,File,Video}`。容器/VM 里没有回收站，删了就是删了。
+
+### 复核命令（别信估算，装完量一次）
+
+```bash
+df -h /                                   # 全盘
+du -sh /opt/QQ ~/.config/QQ /opt/arklink*  # 三个大头
+du -sh /var/cache/apt /var/lib/apt/lists
+```
+
+宿主侧看 VDI 真实占用：VirtualBox 管理器里该虚拟机的「虚拟介质管理器」，
+或 `VBoxManage showmediuminfo disk "E:/vm/arklink/arklink.vdi"`（看 `Actual size`）。
+装完若远大于 3.4GB，八成是没删 ISO、没清 apt、或者装了桌面环境。
+
+### 一句话选型
+
+* **只要后台发送、能接受重启后重新登录** → Windows 独立会话，**1.5GB、0 内存**，最快；
+* **要一个真正隔离、可整体备份/迁移的环境** → VirtualBox + Ubuntu Server，**3.4GB / 2GB 内存**；
+* **C: 只剩 20GB 且不想装 VirtualBox** → WSL2，**2.3GB**，代价是开 Hyper-V 并重启一次；
+* Windows 虚拟机可以直接排除：**22GB 起步**，是 Linux 方案的 6 倍。

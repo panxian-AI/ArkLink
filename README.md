@@ -146,7 +146,16 @@ python -m arklink send --to 示例好友 --text "hi" --engine x11 --yes
 ```
 
 配方（Debian 12 + Xvfb + QQ Linux + xdotool，含 Dockerfile）见
-[docs/无头Linux运行.md](docs/无头Linux运行.md)。
+[docs/无头Linux运行.md](docs/无头Linux运行.md)。一键装完用
+`tools/setup_guest.sh`（自动处理中文字体与 24.04 的 `libasound2t64` 改名）。
+
+资源占用（估算）：VirtualBox + Ubuntu Server 最小安装约 **3.4GB 磁盘、2GB 内存**，
+把镜像放在 D:/E: 就完全不占系统盘；WSL2 形态约 2.3GB；Windows 虚拟机 22GB 起步，不划算。
+
+在 Windows 上判断"我到底有没有隔离"，跑 `python tools/check_session.py`：
+它读每个 QQ 进程的 `SessionId`，和当前进程不同才算真隔离（同会话必然抢焦点、
+共用剪贴板）。四种"另开桌面"的区别见
+[docs/Windows会话隔离.md](docs/Windows会话隔离.md)。
 
 ### Linux
 
@@ -275,7 +284,8 @@ tests/
 | [docs/Milky接入.md](docs/Milky接入.md) | Milky 配置、映射表、协议差异、排障 |
 | [docs/Satori接入.md](docs/Satori接入.md) | Satori 配置、XML 编码、id 映射、能力对照 |
 | [docs/发消息链路.md](docs/发消息链路.md) | 三条发送路线、UI 通道踩坑、进程内直调逆向结论、1.0 清单 |
-| [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑 |
+| [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑、**各形态磁盘/内存账单** |
+| [docs/Windows会话隔离.md](docs/Windows会话隔离.md) | 「另开一个桌面」四种做法哪个能行：虚拟桌面/CreateDesktop/独立窗口站/独立会话，及 CDP 备选 |
 
 ## 合规与安全
 
