@@ -1,6 +1,11 @@
 # ArkLink
 
-ArkBot 的**协议外挂层**。四个通道、一套契约：
+[![ArkBot](https://img.shields.io/badge/%E4%B8%8A%E5%B1%82%E6%A1%86%E6%9E%B6-ArkBot-7F77DD)](https://github.com/panxian-AI/ArkBot)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **姊妹仓库**：[ArkBot](https://github.com/panxian-AI/ArkBot) 是上层业务框架 —— 插件、规则、调度、发件箱都在那边；本仓库只负责「怎么连上 QQ」。两者依赖单向、版本独立、可各自单独安装。
+
+五个通道、一套契约：
 
 | 通道 | 用途 | 状态 |
 |------|------|------|
