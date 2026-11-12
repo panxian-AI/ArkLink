@@ -1,0 +1,41 @@
+# ArkLink 配置示例 —— 这些片段放进 ArkBot 的 bot.toml
+# 前提：pip install arklink（或用点分路径，见下）
+
+# ---------- 1. Milky（推荐：能力强、生态新） ----------
+[[adapters]]
+type = "milky"
+base_url = "http://127.0.0.1:3000"     # 协议端地址，务必只监听 127.0.0.1
+access_token = "change-me"
+# event_url = "ws://127.0.0.1:3000/event"   # 默认由 base_url 推导
+reconnect_interval = 3.0
+max_backoff = 60.0
+
+# ---------- 2. Satori（Koishi / Chronocat） ----------
+# [[adapters]]
+# type = "satori"
+# api_base = "http://127.0.0.1:5140"
+# token = "change-me"
+# platform = "qq"
+# user_id = ""                          # 可留空，READY 后自动填
+
+# ---------- 3. 原生协议（研究态，不登录） ----------
+# [[adapters]]
+# type = "ntqq-native"
+# uin = 10001
+# signer_url = "http://127.0.0.1:8080"
+# allow_login = false                   # 置 true 也只是打印缺失清单
+
+# ---------- 4. 不装包时的点分路径写法 ----------
+# [[adapters]]
+# type = "arklink.milky:MilkyAdapter"
+# base_url = "http://127.0.0.1:3000"
+
+# ---------- 5. 与官方通道组双通道 ----------
+# [[adapters]]
+# type = "milky"
+# base_url = "http://127.0.0.1:3000"
+#
+# [[adapters]]
+# type = "official_qq"
+# app_id = "..."
+# app_secret = "..."

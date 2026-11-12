@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          # 挂载测试需要框架本体；装不上也不影响纯协议测试
+          pip install "arkbot @ git+https://github.com/panxian-AI/ArkBot"
+
+      - name: 自检（TEA / SSO / protobuf / 管线）
+        run: python -m arklink selftest
+
+      - name: 单元与挂载测试
+        run: pytest tests -q
+
+      - name: CLI 冒烟
+        run: |
+          python -m arklink pb --hex 089601120361726b
+          python -m arklink --help
