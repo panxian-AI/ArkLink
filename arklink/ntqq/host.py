@@ -54,8 +54,15 @@ class PROCESSENTRY32W(ctypes.Structure):
         ("th32ParentProcessID", ctypes.c_uint32),
         ("pcPriClassBase", ctypes.c_int32),
         ("dwFlags", ctypes.c_uint32),
-        ("szExeFile", ctypes.c_wchar * 260),
+        # 用 uint16 数组而不是 c_wchar：c_wchar 在 Linux 上是 4 字节
+        ("szExeFile", ctypes.c_uint16 * 260),
     ]
+
+
+def _exe_name(entry: "PROCESSENTRY32W") -> str:
+    """从 PROCESSENTRY32W 取 exe 名（UTF-16LE，遇 0 截断）。"""
+    raw = bytes(entry.szExeFile)
+    return raw.decode("utf-16-le", "ignore").split("\x00", 1)[0]
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -204,7 +211,7 @@ class _Win32:
             entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
             if self.kernel32.Process32FirstW(snap, ctypes.byref(entry)):
                 while True:
-                    if (entry.szExeFile or "").lower() in wanted:
+                    if _exe_name(entry).lower() in wanted:
                         found.append(int(entry.th32ProcessID))
                     if not self.kernel32.Process32NextW(snap, ctypes.byref(entry)):
                         break
