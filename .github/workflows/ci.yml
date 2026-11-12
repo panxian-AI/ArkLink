@@ -34,6 +34,11 @@ jobs:
       - name: 单元与挂载测试
         run: pytest tests -q
 
+      - name: 编译 POSIX hook 模块
+        run: |
+          python tools/build_hook.py
+          ls -l hookdll/build/
+
       - name: CLI 冒烟
         run: |
           python -m arklink pb --hex 089601120361726b

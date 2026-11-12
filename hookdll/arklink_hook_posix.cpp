@@ -13,6 +13,7 @@
 // 见 docs/Linux适配.md 的三条路线。
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
