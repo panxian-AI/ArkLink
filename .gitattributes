@@ -1,0 +1,8 @@
+# Shell 脚本必须保持 LF：CRLF 会让 Linux 报 `bad interpreter: /usr/bin/env bash^M`
+*.sh text eol=lf
+
+# Windows 侧源码与文档按平台默认即可
+*.py text
+*.md text
+*.cpp text
+*.h text
