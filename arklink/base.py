@@ -68,6 +68,7 @@ class LinkAdapter:
 
     def __init__(self) -> None:
         self._handler: EventHandler | None = None
+        self._raw_handler: Callable[[dict[str, Any]], Any] | None = None
         self._running = False
         self._connected = asyncio.Event()
 
@@ -75,12 +76,28 @@ class LinkAdapter:
     def on_event(self, handler: EventHandler) -> None:
         self._handler = handler
 
+    def on_raw_event(self, handler: Callable[[dict[str, Any]], Any] | None) -> None:
+        """订阅**未转换**的 OneBot 形状 dict。
+
+        standalone 的 OneBot 服务端（`arklink serve onebot`）靠这个把事件
+        直接转发给 NoneBot2 / Koishi，不需要安装 ArkBot，也不需要构造 Event。
+        """
+        self._raw_handler = handler
+
     async def _emit_dict(self, raw: dict[str, Any]) -> None:
         """把 OneBot 形状的 dict 交给框架。
 
         必须以独立任务分发：处理器里通常要 await 回复（回调 API），
         而 API 响应要靠接收循环解析，内联 await 会死锁。
         """
+        if self._raw_handler is not None:
+            try:
+                self._raw_handler(raw)
+            except Exception:  # 订阅方出错不能影响协议栈
+                logger.exception("raw 事件订阅者异常")
+        if self._handler is None:
+            return
+
         from arkbot.event import Event  # 运行时绑定
 
         event = Event.from_raw(raw)

@@ -44,7 +44,7 @@ ArkBot 的**协议外挂层**。四个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
-pytest tests -q                   # 154 项测试
+pytest tests -q                   # 162 项测试
 ```
 
 ### 接一个 Milky 协议端
@@ -93,6 +93,17 @@ python -m arklink roster --json            # 好友 + 群，验证票据是否�
 发消息故意不做（要过 A2 校验和频率风控，出问题无法定位），
 详见 [docs/扫码登录.md](docs/扫码登录.md)。
 
+### 一键替换 NapCat（上层零改动）
+
+```bash
+python -m arklink hook --install                                  # 找进程→注入→自检→打印接入地址
+python -m arklink serve onebot --type ntqq-hook --port 6700 --token t
+```
+
+`serve onebot` 是一个标准库写的 **OneBot 11 服务端**（正向 WS + HTTP API + HTTP 上报同端口，
+四个 WS 路径都认），所以 NoneBot2 / Koishi / AstrBot / 自研脚本只改地址、不改代码。
+细节见 [docs/一键替换NapCat.md](docs/一键替换NapCat.md)。
+
 ### 注入通道：自己登 QQ → 检测进程 → 注入 → 收推送
 
 ```bash
@@ -106,6 +117,12 @@ python -m arklink hook --probe --prefix arklink --seconds 30 --ping
 我们把这套结构自研复刻（自己的帧协议、自己的 DLL），并与 `ntqq-native` 的
 `push.to_onebot` 打通。协议格式、真机步骤和踩坑记录见
 [docs/进程注入通道.md](docs/进程注入通道.md)。
+
+### 协议级封禁的应对思路
+
+如果腾讯未来在**协议层**封禁（看流量指纹/客户端完整性/账号行为），再强的协议实现也会死。
+我们的答案是**零协议改写**：流量永远由官方客户端自己产生，我们只在进程内借用它的函数；
+注入方式、旁路读取、节律策略三层递进。见 [docs/协议级封禁.md](docs/协议级封禁.md)。
 
 ## 逆向工具箱
 

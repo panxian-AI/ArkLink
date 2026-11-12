@@ -258,6 +258,9 @@ def _hook(args: argparse.Namespace) -> int:
             print(f"\n建议注入：pid={main.pid}（管道 {main.pipe or '无'} / {main.pipe_state}）")
         return 0
 
+    if args.install:
+        return _install(args)
+
     if args.list or not (args.inject or args.probe or args.unload):
         return _list()
 
@@ -360,6 +363,156 @@ def _default_appid() -> int:
     return APP_ID
 
 
+def _root() -> str:
+    import pathlib
+
+    return str(pathlib.Path(__file__).resolve().parents[1])
+
+
+def _try_build_hook() -> str:
+    """没现成 DLL 就现场编译（用户机器上有 mingw 才行）。"""
+    import subprocess
+
+    from .ntqq import hookproc
+
+    script = os.path.join(_root(), "tools", "build_hook.py")
+    if not os.path.exists(script):
+        return ""
+    print("没有现成的 hook DLL，尝试现场编译…")
+    result = subprocess.run([sys.executable, script], capture_output=True, text=True)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        print("编译失败：" + " / ".join(tail), file=sys.stderr)
+        print("需要 mingw-w64（x86_64-w64-mingw32-g++）或 MSVC，也可以 --dll 指定现成 DLL", file=sys.stderr)
+        return ""
+    dll = hookproc.default_hook_dll()
+    if dll:
+        print(f"编译完成：{dll}")
+    return dll
+
+
+def _install(args: argparse.Namespace) -> int:
+    """一键接入：找进程 → 编译/注入 → 握手自检 → 打印接入命令。"""
+    from .ntqq import hookproc
+
+    scanner = hookproc.ProcessScanner()
+    processes = hookproc.find_processes(("QQ.exe",), scanner)
+    if not processes:
+        print("没找到 QQ.exe。先手动打开并登录 QQ 客户端（登录态由客户端自己维持），再跑一次。")
+        return 1
+
+    target = next((p for p in processes if p.pid == args.pid), None) if args.pid else hookproc.pick_main(processes)
+    if target is None:
+        print(f"没有 pid={args.pid} 的 QQ 主进程", file=sys.stderr)
+        return 1
+    print(f"目标进程：pid={target.pid}（{len(processes)} 个 QQ 进程里挑出的主进程）")
+
+    dll = args.dll or hookproc.default_hook_dll()
+    if not dll:
+        dll = _try_build_hook()
+    if not dll:
+        print("没有可用的 hook DLL", file=sys.stderr)
+        return 1
+
+    prefix = args.prefix
+    state = scanner.probe_pipe(target.pid)
+    if state == "missing" or not prefix:
+        if state == "missing":
+            print(f"注入 {os.path.basename(dll)} …")
+            try:
+                result = hookproc.Injector(scanner).inject(target.pid, dll, args.method)
+            except hookproc.HookError as exc:
+                print(f"注入失败：{exc}", file=sys.stderr)
+                return 1
+            print(f"注入成功（base=0x{result.handle:x}）")
+        for candidate in hookproc.PIPE_PREFIXES:
+            if scanner.pipe_name(target.pid, "control").startswith(candidate):
+                prefix = candidate
+                break
+    prefix = prefix or "arklink"
+    return asyncio.run(_install_verify(target.pid, prefix, args))
+
+
+async def _install_verify(pid: int, prefix: str, args: argparse.Namespace) -> int:
+    from .ntqq.hookpipe import HookClient, PipeError
+
+    client = HookClient(pid, prefix=prefix)
+    state: dict[str, str] = {}
+    client.on_login_state = lambda frame: state.update(uin=frame.uin if frame.logged_in else "")
+    try:
+        await client.connect(timeout=args.timeout)
+    except (PipeError, OSError, asyncio.TimeoutError) as exc:
+        print(f"连不上管道 {prefix}.{pid}.*：{exc}", file=sys.stderr)
+        return 2
+    print(f"管道已连通：prefix={prefix} uin={client.uin or '（还没登录）'}")
+    try:
+        reply = await client.request("arklink.status", b"", timeout=5)
+        if reply.body:
+            print(f"自检：{reply.body.decode('utf-8', 'replace')}")
+    except Exception:
+        pass
+    await client.close()
+
+    token = args.token or "arklink"
+    print(
+        "\n接入方式（上层不用改代码，只改地址）：\n"
+        f"  python -m arklink serve onebot --type ntqq-hook --port 6700 --token {token}\n"
+        "  NoneBot2 / Koishi 连：ws://127.0.0.1:6700/onebot/v11/ws\n"
+        "  HTTP API 同端口：http://127.0.0.1:6700/\n"
+        "\nArkBot 侧 bot.toml：\n"
+        "  [[adapters]]\n"
+        '  type = "ntqq-hook"\n'
+        f'  dll_path = "{os.path.basename(args.dll or "") or ""}"\n'
+        "  auto_inject = true\n"
+        "  read_only = true\n"
+    )
+    if not client.logged_in:
+        print("提示：QQ 还没登录完成，登录后通道会自动就绪（无需重新注入）。")
+    return 0
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """把任意适配器暴露成一个 OneBot 11 服务端（NapCat 平替）。"""
+    import json as _json
+
+    from . import registry
+    from .onebot import OneBot11Server
+
+    cfg: dict[str, Any] = {}
+    for item in args.set or []:
+        key, _, raw = item.partition("=")
+        if not key:
+            continue
+        try:
+            cfg[key] = _json.loads(raw)
+        except _json.JSONDecodeError:
+            cfg[key] = raw
+
+    adapter = registry.create(args.type, **cfg)
+    reports = [u for u in (args.report or "").split(",") if u]
+
+    async def main() -> int:
+        server = OneBot11Server(
+            [adapter],
+            host=args.host,
+            port=args.port,
+            access_token=args.token,
+            report_urls=reports,
+            heartbeat=args.heartbeat,
+        )
+        task = asyncio.create_task(adapter.run_forever(), name="adapter")
+        try:
+            await server.serve_forever()
+        finally:
+            await adapter.stop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return 0
+
+    print(f"适配器：{getattr(adapter, 'name', args.type)}")
+    return asyncio.run(main())
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arklink", description="ArkLink 协议探针与逆向工具")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -422,7 +575,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.add_argument("--seconds", type=float, default=30.0, help="--probe 监听时长")
     p_hook.add_argument("--count", type=int, default=0, help="收到 N 条后退出")
     p_hook.add_argument("--ping", action="store_true", help="--probe 时先发一个 ping 请求")
+    p_hook.add_argument("--install", action="store_true", help="一键接入：找进程→编译/注入→自检→打印接入命令")
+    p_hook.add_argument("--token", default="", help="--install 时打印给上层的 token（默认 arklink）")
+    p_hook.add_argument("--timeout", type=float, default=20.0, help="--install 等待握手的时间")
     p_hook.set_defaults(func=_hook)
+
+    p_serve = sub.add_parser("serve", help="把适配器暴露成 OneBot 11 服务端（NapCat 平替）")
+    p_serve.add_argument("kind", choices=["onebot"], help="目前只有 onebot")
+    p_serve.add_argument("--type", default="ntqq-hook", help="适配器类型（见 registry）")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=6700)
+    p_serve.add_argument("--token", default="", help="access_token，空 = 不校验")
+    p_serve.add_argument("--report", default="", help="HTTP 上报地址，逗号分隔")
+    p_serve.add_argument("--heartbeat", type=float, default=30.0, help="心跳间隔秒，0 = 关")
+    p_serve.add_argument("--set", action="append", metavar="K=V", help="传给适配器的参数，可重复（值按 JSON 解析）")
+    p_serve.set_defaults(func=_serve)
     return parser
 
 
