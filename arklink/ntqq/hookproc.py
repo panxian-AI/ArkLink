@@ -32,11 +32,34 @@ logger = logging.getLogger("arklink.ntqq.hook")
 
 IS_WINDOWS = os.name == "nt"
 
-#: QQ 主进程的候选可执行名（QQNT 是 QQ.exe；旧版是 QQScLauncher.exe）
-DEFAULT_EXE_NAMES: tuple[str, ...] = ("QQ.exe",)
+#: QQ 主进程的候选可执行名。
+#: Windows: QQNT 是 `QQ.exe`（旧版 QQScLauncher.exe）；
+#: Linux:  官方 Linux 版 QQNT 的二进制叫 `qq`（包内是 /opt/QQ/qq）。
+DEFAULT_EXE_NAMES: tuple[str, ...] = ("QQ.exe", "QQ", "qq")
 
 #: 管道前缀。自有 DLL 用 arklink，现成 hook 用 mojo
 PIPE_PREFIXES: tuple[str, ...] = ("mojo", "arklink")
+
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def runtime_dir() -> str:
+    """Linux 上放 socket 文件的地方（Windows 不用）。"""
+    return os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+
+
+def pipe_path(name: str) -> str:
+    """把裸名字（`arklink.123.control`）翻译成平台上的实际地址。
+
+    - Windows：`\\\\.\\pipe\\<name>`（内核命名管道，不落磁盘）
+    - Linux：`<runtime_dir>/<name>`（Unix domain socket 文件）
+    - macOS：同上，Unix domain socket
+    """
+    if is_windows():
+        return f"\\\\.\\pipe\\{name}"
+    return os.path.join(runtime_dir(), name)
 
 # ---- Win32 常量 ----
 TH32CS_SNAPPROCESS = 0x00000002
@@ -346,7 +369,7 @@ class ProcessScanner:
     # -- 进程表 --
     def _snapshot(self) -> list[tuple[int, str]]:
         if not IS_WINDOWS:
-            return []
+            return self._snapshot_posix()
         k32 = _kernel32()
         k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -365,10 +388,45 @@ class ProcessScanner:
             k32.CloseHandle(ctypes.c_void_p(snap))
 
     # -- 命令行 --
+    def _snapshot_posix(self) -> list[tuple[int, str]]:
+        """Linux/macOS：遍历 /proc（macOS 没 /proc，走 ps 兜底）。"""
+        out: list[tuple[int, str]] = []
+        proc = "/proc"
+        if os.path.isdir(proc):
+            for entry in os.listdir(proc):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                name = ""
+                try:
+                    with open(f"{proc}/{entry}/comm", "r", encoding="utf-8", errors="replace") as fh:
+                        name = fh.read().strip()
+                except OSError:
+                    continue
+                if not name:
+                    continue
+                out.append((pid, name))
+            return out
+        # macOS / 没有 /proc 的系统
+        import subprocess
+
+        try:
+            text = subprocess.run(
+                ["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=5
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        for line in text.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2 or not parts[0].isdigit():
+                continue
+            out.append((int(parts[0]), os.path.basename(parts[1].strip())))
+        return out
+
     def command_line(self, pid: int) -> str:
-        """读目标进程 PEB 里的命令行。读不到就返回空串，不抛。"""
+        """读目标进程的完整命令行。读不到就返回空串，不抛。"""
         if not IS_WINDOWS:
-            return ""
+            return self._command_line_posix(pid)
         handle = None
         k32 = _kernel32()
         try:
@@ -409,13 +467,36 @@ class ProcessScanner:
                 k32.CloseHandle(ctypes.c_void_p(handle))
 
     # -- 管道表 --
+    def _command_line_posix(self, pid: int) -> str:
+        """`/proc/<pid>/cmdline` 是 NUL 分隔的，转成空格方便统一判断 `--type=`。"""
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                raw = fh.read(64 * 1024)
+        except OSError:
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+
     def pipe_names(self) -> set[str]:
         if not IS_WINDOWS:
-            return set()
+            return self._pipe_names_posix()
         try:
             return {n for n in os.listdir("\\\\.\\pipe\\")}
         except OSError:
             return set()
+
+    def _pipe_names_posix(self) -> set[str]:
+        """Unix domain socket 是磁盘上的文件，列目录即可（抽象命名空间列不出来，
+        所以我们的 .so 固定用文件形式，见 docs/Linux适配.md）。"""
+        found: set[str] = set()
+        for base in {runtime_dir(), "/tmp"}:
+            try:
+                entries = os.listdir(base)
+            except OSError:
+                continue
+            for name in entries:
+                if name.endswith((".control", ".recv")) and "." in name:
+                    found.add(name)
+        return found
 
     def pipe_name(self, pid: int, suffix: str = "control") -> str:
         for prefix in self.pipe_prefixes:
@@ -431,7 +512,7 @@ class ProcessScanner:
         会把对方挤掉，所以调用方要能区分。
         """
         if not IS_WINDOWS:
-            return "missing"
+            return self._probe_socket_posix(pid, suffix)
         name = self.pipe_name(pid, suffix)
         if not name:
             return "missing"
@@ -442,6 +523,25 @@ class ProcessScanner:
             return "busy" if err == ERROR_PIPE_BUSY else "missing"
         k32.CloseHandle(ctypes.c_void_p(handle))
         return "free"
+
+    def _probe_socket_posix(self, pid: int, suffix: str = "control") -> str:
+        import socket
+
+        name = self.pipe_name(pid, suffix)
+        if not name:
+            return "missing"
+        path = pipe_path(name)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(0.3)
+        try:
+            sock.connect(path)
+            return "free"
+        except (FileNotFoundError, ConnectionRefusedError, socket.timeout, OSError):
+            # Unix socket 没有 Windows 那种「在但被独占」的状态：
+            # 有人 listen 就能连（多个客户端也可能同时连），没人 listen 就是 missing。
+            return "missing"
+        finally:
+            sock.close()
 
     # -- 组合 --
     def scan(self, exe_names: Iterable[str] = DEFAULT_EXE_NAMES) -> list[QQProcess]:
@@ -470,10 +570,10 @@ class Injector:
 
     # -- 公开 API --
     def inject(self, pid: int, dll_path: str, method: str = "loadlibrary") -> InjectionResult:
-        if not IS_WINDOWS:
-            raise HookError("注入只在 Windows 上可用")
         if not os.path.isfile(dll_path):
-            raise HookError(f"DLL 不存在：{dll_path}")
+            raise HookError(f"模块文件不存在：{dll_path}")
+        if not IS_WINDOWS:
+            return self._inject_posix(pid, dll_path, method)
         if method != "loadlibrary":
             raise HookError(f"暂不支持的注入方式 {method!r}（当前只有 loadlibrary）")
         kernel = _kernel32()
@@ -576,7 +676,7 @@ class Injector:
         `ArkLinkPrepareUnload` 导出时必须先远程调它，并给它时间 Join。
         """
         if not IS_WINDOWS:
-            return False
+            return self._unload_posix(pid, dll_path)
         prepared = False
         if dll_path:
             rva = export_rva(dll_path, "ArkLinkPrepareUnload")
@@ -593,10 +693,103 @@ class Injector:
             logger.warning("FreeLibrary 调用失败（模块可能仍在进程内，但线程已停）")
         return ok
 
+
+    # -- POSIX（Linux/macOS）--
+    def _inject_posix(self, pid: int, so_path: str, method: str) -> InjectionResult:
+        import platform
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            raise HookError("POSIX 注入目前只实现 Linux（macOS 需要 task_for_pid，未做）")
+        if platform.machine().lower() not in ("x86_64", "amd64"):
+            raise HookError(f"暂不支持 {platform.machine()}，目前只有 x86_64")
+        if method not in ("ptrace", "dlopen", "loadlibrary"):
+            raise HookError(f"Linux 上只支持 ptrace 注入，收到 {method!r}")
+
+        path = os.path.abspath(so_path)
+        base = self._remote_call_posix(pid, "dlopen", arg_str=path, extra_int=RTLD_NOW)
+        note = ""
+        if not base:
+            note = "dlopen 返回 0：模块可能没加载成功（路径权限 / 依赖缺失 / 已被加载）"
+            logger.warning(note)
+        else:
+            logger.info("已注入 %s → pid=%d base=0x%x（ptrace+dlopen）", path, pid, base)
+        return InjectionResult(pid=pid, dll=path, handle=base, note=note, method="ptrace")
+
+    def _unload_posix(self, pid: int, so_path: str) -> bool:
+        base = _module_base_posix(pid, os.path.basename(so_path)) if so_path else 0
+        if not base:
+            logger.warning("目标进程里没找到 %s，无需卸载", so_path)
+            return False
+        result = self._remote_call_posix(pid, "dlclose", arg_int=base)
+        return result == 0
+
+    def _remote_call_posix(
+        self,
+        pid: int,
+        symbol: str,
+        arg_str: str = "",
+        arg_int: int = 0,
+        extra_int: int = 0,
+        timeout: float = 10.0,
+    ) -> int:
+        """在目标进程里调一次 `symbol(arg, extra)`，返回 rax。
+
+        借用的是目标已有的某个线程：停下 → 改寄存器 → 继续 → 再停下 → 还原。
+        返回地址故意写 0：函数返回时会触发 SIGSEGV，被我们（tracer）截获，
+        目标进程自己永远看不到这个信号。
+        """
+        offset = _symbol_offset("libc.so.6", symbol)
+        remote_func = mapping_base(pid, "libc.so.6") + offset
+        if not remote_func:
+            raise HookError(f"目标进程里找不到 libc.so.6（pid={pid}）")
+
+        _ptrace(PTRACE_ATTACH, pid)
+        original = UserRegs()
+        try:
+            _wait_stopped(pid, timeout)
+            _ptrace(PTRACE_GETREGS, pid, 0, ctypes.addressof(original))
+
+            stack = (original.rsp - 0x800) & ~0xF
+            if arg_str:
+                data = arg_str.encode("utf-8") + b"\x00"
+                _write_bytes(pid, stack, data)
+                first = stack
+                second = extra_int
+                # 字符串放栈顶，返回地址槽放在字符串上方，避免被覆盖
+                ret_slot = (stack + len(data) + 15) & ~0xF
+            else:
+                first = arg_int
+                second = extra_int
+                ret_slot = stack
+            _write_word(pid, ret_slot, 0)
+
+            regs = UserRegs()
+            ctypes.memmove(ctypes.addressof(regs), ctypes.addressof(original), ctypes.sizeof(original))
+            regs.rdi = first
+            regs.rsi = second
+            regs.rip = remote_func
+            regs.rsp = ret_slot
+            regs.orig_rax = ctypes.c_ulonglong(-1).value
+            _ptrace(PTRACE_SETREGS, pid, 0, ctypes.addressof(regs))
+
+            _ptrace(PTRACE_CONT, pid, 0, 0)
+            _wait_stopped(pid, timeout)
+
+            after = UserRegs()
+            _ptrace(PTRACE_GETREGS, pid, 0, ctypes.addressof(after))
+            result = int(after.rax)
+        finally:
+            try:
+                _ptrace(PTRACE_SETREGS, pid, 0, ctypes.addressof(original), allow_fail=True)
+            finally:
+                _ptrace(PTRACE_DETACH, pid, 0, 0, allow_fail=True)
+        return result
+
     def module_loaded(self, pid: int, module_name: str) -> int:
         """目标进程里是否已经加载了某个模块，返回基址（0 = 没加载）。"""
         if not IS_WINDOWS:
-            return 0
+            return _module_base_posix(pid, module_name)
         k32 = _kernel32()
         k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
@@ -613,6 +806,156 @@ class Injector:
             return 0
         finally:
             k32.CloseHandle(ctypes.c_void_p(snap))
+
+
+# ---------------------------------------------------------------- Linux 注入
+# 思路：ptrace 停下目标 → 把参数写到它的栈上 → 把 rip 指到 libc 的 dlopen →
+# 单步跑到返回 → 读 rax → 恢复寄存器 → detach。整个过程目标进程只「借」了
+# 一小段栈空间，代码段和内存映像不变，模块用 dlopen 正式加载（可 dlclose 卸载）。
+#
+# 与 Windows 的 CreateRemoteThread 相比，这里没有「远程线程」概念：借的是目标
+# 已有的某个线程，调用完立刻还原，所以不会有幽灵线程残留。
+PTRACE_CONT = 7
+PTRACE_GETREGS = 12
+PTRACE_SETREGS = 13
+PTRACE_ATTACH = 16
+PTRACE_DETACH = 17
+PTRACE_PEEKDATA = 2
+PTRACE_POKEDATA = 5
+
+RTLD_NOW = 2
+
+_REGS_FIELDS = (
+    "r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8",
+    "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax", "rip", "cs", "eflags",
+    "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs",
+)
+
+
+class UserRegs(ctypes.Structure):
+    """x86_64 `struct user_regs_struct`。字段顺序与内核头文件一致，少一个就全错。"""
+
+    _fields_ = [(name, ctypes.c_ulonglong) for name in _REGS_FIELDS]
+
+
+def _libc_handle() -> Any:
+    import ctypes.util
+
+    name = ctypes.util.find_library("c") or "libc.so.6"
+    lib = ctypes.CDLL(name, use_errno=True)
+    lib.ptrace.restype = ctypes.c_long
+    lib.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
+    return lib
+
+
+def _ptrace(request: int, pid: int, addr: int = 0, data: int = 0, *, allow_fail: bool = False) -> int:
+    ctypes.set_errno(0)
+    result = _libc_handle().ptrace(request, pid, ctypes.c_void_p(addr), ctypes.c_void_p(data))
+    if result == -1 and not allow_fail:
+        raise HookError(f"ptrace({request}, pid={pid}) 失败 errno={ctypes.get_errno()}")
+    return int(result)
+
+
+def _maps(pid: int | str) -> list[tuple[int, int, str, str]]:
+    """解析 /proc/<pid>/maps → [(start, end, perms, path)]。"""
+    if pid == "self":
+        path = "/proc/self/maps"
+    else:
+        path = f"/proc/{pid}/maps"
+    out: list[tuple[int, int, str, str]] = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split(None, 5)
+                if len(parts) < 5:
+                    continue
+                try:
+                    start_s, end_s = parts[0].split("-")
+                    start, end = int(start_s, 16), int(end_s, 16)
+                except ValueError:
+                    continue
+                out.append((start, end, parts[1], parts[5].strip() if len(parts) > 5 else ""))
+    except OSError as exc:
+        raise HookError(f"读 /proc/{pid}/maps 失败：{exc}") from exc
+    return out
+
+
+def mapping_base(pid: int | str, needle: str) -> int:
+    """某个共享库在目标进程里的加载基址（取最小 start）。"""
+    candidates = [start for start, _end, _perms, path in _maps(pid) if needle in path]
+    return min(candidates) if candidates else 0
+
+
+def _module_base_posix(pid: int, module_name: str) -> int:
+    for start, _end, _perms, path in _maps(pid):
+        if os.path.basename(path) == module_name:
+            return start
+    return 0
+
+
+def _symbol_offset(needle: str, symbol: str) -> int:
+    """本地 libc 里符号相对基址的偏移（同机同版本，可直接加到远端基址）。"""
+    base = mapping_base("self", needle)
+    if not base:
+        raise HookError(f"本地找不到 {needle} 的映射")
+    try:
+        lib = ctypes.CDLL(needle if not needle.startswith("libc") else "libc.so.6")
+        func = getattr(lib, symbol)
+    except (OSError, AttributeError) as exc:
+        raise HookError(f"本地 libc 没有 {symbol}：{exc}") from exc
+    address = ctypes.cast(func, ctypes.c_void_p).value
+    if not address:
+        raise HookError(f"拿不到 {symbol} 地址")
+    return int(address) - base
+
+
+def _read_word(pid: int, addr: int) -> int:
+    ctypes.set_errno(0)
+    value = _libc_handle().ptrace(PTRACE_PEEKDATA, pid, ctypes.c_void_p(addr), None)
+    err = ctypes.get_errno()
+    if value == -1 and err:
+        raise HookError(f"PEEKDATA 0x{addr:x} 失败 errno={err}")
+    return int(ctypes.c_ulonglong(value).value)
+
+
+def _write_word(pid: int, addr: int, word: int) -> None:
+    _ptrace(PTRACE_POKEDATA, pid, addr, word)
+
+
+def _write_bytes(pid: int, addr: int, data: bytes) -> None:
+    """按 8 字节对齐写；尾部不足 8 字节要读-改-写，否则会把相邻数据写坏。"""
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset : offset + 8]
+        target = addr + offset
+        if len(chunk) == 8:
+            word = int.from_bytes(chunk, "little")
+        else:
+            word = _read_word(pid, target)
+            mask = (1 << (8 * len(chunk))) - 1
+            word = (word & ~mask) | int.from_bytes(chunk, "little")
+        _write_word(pid, target, word)
+        offset += 8
+
+
+def _wait_stopped(pid: int, timeout: float = 10.0) -> int:
+    """等目标停下。用 SIGALRM 兜底，避免 ptrace 序列卡死整个进程。"""
+    import signal
+
+    def _alarm(_signum, _frame):
+        raise HookError(f"等待 pid={pid} 停下超时（{timeout:.0f}s）")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        while True:
+            wpid, status = os.waitpid(pid, os.WUNTRACED)
+            if wpid == pid and os.WIFSTOPPED(status):
+                return status
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
 
 
 # ---------------------------------------------------------------- 门面
@@ -644,10 +987,14 @@ def default_hook_dll(arch: str = "x64") -> str:
     if env:
         return env
     here = os.path.dirname(os.path.abspath(__file__))
-    local = os.path.join(here, "..", "..", "hookdll", "build", f"arklink-hook-{arch}.dll")
-    local = os.path.normpath(local)
-    if os.path.isfile(local):
-        return local
+    build = os.path.normpath(os.path.join(here, "..", "..", "hookdll", "build"))
+    names = [f"arklink-hook-{arch}.dll"] if IS_WINDOWS else [f"libarklink-hook-{arch}.so", "libarklink-hook.so"]
+    for name in names:
+        local = os.path.join(build, name)
+        if os.path.isfile(local):
+            return local
+    if not IS_WINDOWS:
+        return ""
     for candidate in (
         rf"D:\snow\native\snowluma-win32-{arch}.dll",
         os.path.expandvars(rf"%LOCALAPPDATA%\Programs\SnowLuma\native\snowluma-win32-{arch}.dll"),

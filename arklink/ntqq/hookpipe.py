@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Any, Callable, Protocol
 
+from .hookproc import pipe_path
 from .hookproto import (
     FLAG_WANT_REPLY,
     OP_ACK,
@@ -294,6 +295,65 @@ class MemoryPipe:
         self.closed = True
 
 
+class UnixPipe:
+    """Unix domain socket 版管道（Linux/macOS）。
+
+    和 Windows 命名管道最大的差别：**没有「独占」概念**，没有 overlapped I/O，
+    也没有 ERROR_PIPE_BUSY。所以直接用 asyncio 的流，一行线程都不用起。
+    socket 文件放在 `$XDG_RUNTIME_DIR` 或 `/tmp`，见 `hookproc.pipe_path`。
+    """
+
+    def __init__(self, name: str, path: str = "") -> None:
+        self.name = name
+        self.path = path or pipe_path(name)
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._closed = False
+
+    async def open(self, timeout: float = 5.0) -> None:
+        if self._reader is not None:
+            return
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(self.path), timeout=timeout
+            )
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+            raise PipeError(f"连不上 {self.path}：{exc}") from exc
+
+    async def read(self) -> bytes:
+        if self._reader is None:
+            raise PipeError("管道没有打开")
+        data = await self._reader.read(PIPE_READ_CHUNK)
+        if not data:
+            raise PipeError(f"{self.path} 对端关闭")
+        return data
+
+    async def write(self, data: bytes) -> None:
+        if self._writer is None:
+            raise PipeError("管道没有打开")
+        self._writer.write(data)
+        await self._writer.drain()
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._writer is not None:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+        self._reader = None
+        self._writer = None
+
+
+def default_pipe_factory(name: str) -> "PipeLink":
+    """按平台给一个管道实现。名字是裸名（`arklink.<pid>.control`）。"""
+    if IS_WINDOWS:
+        return Win32Pipe(name)
+    return UnixPipe(name)
+
+
+
 # ---------------------------------------------------------------- 客户端
 class Hello:
     __slots__ = ("pipe_name", "pid", "recv")
@@ -342,7 +402,7 @@ class HookClient:
         self.recv_hello: Hello | None = None
         self.login_frame: Frame | None = None
 
-        self._factory = pipe_factory or (lambda name: Win32Pipe(name))
+        self._factory = pipe_factory or default_pipe_factory
         self._control: PipeLink | None = None
         self._recv: PipeLink | None = None
         self._control_reader = FrameReader()

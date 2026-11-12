@@ -6,7 +6,7 @@ ArkBot 的**协议外挂层**。四个通道、一套契约：
 |------|------|------|
 | `milky` | Milky 1.3（NapCat / Lagrange / Acidify / LLOneBot） | ✅ 可用 |
 | `satori` | Satori v1（Koishi / Chronocat，顺带接上 Telegram/Discord） | ✅ 可用 |
-| `ntqq-hook` | 检测官方 QQ 进程 → 注入自研 DLL → 管道收推送 | 🟡 链路已通真机，收包侧待接内核 API |
+| `ntqq-hook` | 检测官方 QQ 进程 → 注入自研模块 → 管道收推送（Win + Linux） | 🟡 链路已通真机，收包侧待接内核 API |
 | `ntqq-native` | QQ NT 原生 SSO：扫码登录 / 只读花名册 / 收推送 | 🟡 只读可用，不发消息 |
 | `ntqq-client` | 操作**已登录的官方客户端**（Win32 键鼠，只发文本） | ⚠️ 可用，最后一条通知腿 |
 
@@ -44,7 +44,7 @@ ArkBot 的**协议外挂层**。四个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
-pytest tests -q                   # 162 项测试
+pytest tests -q                   # 166 项测试（Linux 上另有 8 项平台测试）
 ```
 
 ### 接一个 Milky 协议端
@@ -117,6 +117,18 @@ python -m arklink hook --probe --prefix arklink --seconds 30 --ping
 我们把这套结构自研复刻（自己的帧协议、自己的 DLL），并与 `ntqq-native` 的
 `push.to_onebot` 打通。协议格式、真机步骤和踩坑记录见
 [docs/进程注入通道.md](docs/进程注入通道.md)。
+
+### Linux
+
+同一套代码在 Linux 上也能跑：进程发现走 `/proc`，管道换成 Unix domain socket
+（帧协议不变），注入走 `ptrace + dlopen`。模块编译成 `.so`：
+
+```bash
+sudo apt install build-essential && python tools/build_hook.py   # libarklink-hook-x64.so
+python -m arklink hook --install                                  # 需要 ptrace_scope=0
+```
+
+差异、权限、坑都在 [docs/Linux适配.md](docs/Linux适配.md)。
 
 ### 协议级封禁的应对思路
 

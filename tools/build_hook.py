@@ -1,10 +1,14 @@
-"""编译 ArkLink 的 hook DLL（x64，用 mingw，不需要装 Visual Studio）。
+"""编译 ArkLink 的 hook 模块（Windows 是 DLL，Linux/macOS 是 .so）。
 
-    python tools/build_hook.py            # 自动找编译器
-    python tools/build_hook.py --cc "D:/mingw64/bin/x86_64-w64-mingw32-g++.exe"
+    python tools/build_hook.py                     # 自动找编译器
+    python tools/build_hook.py --cc g++-13         # 指定编译器
 
-产物：hookdll/build/arklink-hook-x64.dll
-编译完会顺手把导出表打出来，确认 ArkLinkPrepareUnload 在（卸载依赖它）。
+产物：
+    Windows  hookdll/build/arklink-hook-x64.dll   （mingw-w64）
+    POSIX    hookdll/build/libarklink-hook-x64.so （g++/clang++）
+
+编译完会顺手把导出表打出来，确认 ArkLinkPrepareUnload 在（卸载依赖它，
+缺了它 dlclose/FreeLibrary 时工作线程会跳进已释放内存，直接把 QQ 带崩）。
 """
 
 from __future__ import annotations
@@ -18,16 +22,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "hookdll" / "arklink_hook.cpp"
+IS_WINDOWS = os.name == "nt"
+SRC = ROOT / "hookdll" / ("arklink_hook.cpp" if IS_WINDOWS else "arklink_hook_posix.cpp")
 OUT_DIR = ROOT / "hookdll" / "build"
-OUT = OUT_DIR / "arklink-hook-x64.dll"
+OUT = OUT_DIR / ("arklink-hook-x64.dll" if IS_WINDOWS else "libarklink-hook-x64.so")
 
 CANDIDATES = (
-    "x86_64-w64-mingw32-g++",
-    "g++",
-    r"D:/mingw64/bin/x86_64-w64-mingw32-g++.exe",
-    r"C:/msys64/mingw64/bin/x86_64-w64-mingw32-g++.exe",
-    r"C:/ProgramData/mingw64/mingw64/bin/x86_64-w64-mingw32-g++.exe",
+    ("x86_64-w64-mingw32-g++", "g++", r"D:/mingw64/bin/x86_64-w64-mingw32-g++.exe",
+     r"C:/msys64/mingw64/bin/x86_64-w64-mingw32-g++.exe",
+     r"C:/ProgramData/mingw64/mingw64/bin/x86_64-w64-mingw32-g++.exe")
+    if IS_WINDOWS
+    else ("g++", "c++", "clang++")
 )
 
 
@@ -40,7 +45,8 @@ def find_compiler(explicit: str = "") -> str:
         found = shutil.which(candidate) if os.sep not in candidate else (candidate if Path(candidate).is_file() else None)
         if found:
             return found
-    raise SystemExit("找不到 mingw 的 g++。装一个（scoop install mingw）或用 --cc 指定路径。")
+    hint = "装一个 mingw（scoop install mingw）" if IS_WINDOWS else "装一个 g++（apt install build-essential）"
+    raise SystemExit(f"找不到 C++ 编译器。{hint}，或用 --cc 指定路径。")
 
 
 def exports_of(path: Path) -> list[str]:
@@ -84,6 +90,22 @@ def exports_of(path: Path) -> list[str]:
     return result
 
 
+def posix_exports(path: Path) -> list[str]:
+    """用 nm 读动态导出（等价于 Windows 侧解析 PE 导出表）。"""
+    try:
+        text = subprocess.run(
+            ["nm", "-D", "--defined-only", str(path)], capture_output=True, text=True
+        ).stdout
+    except OSError:
+        return []
+    names: list[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] in ("T", "t", "W"):
+            names.append(parts[2])
+    return names
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="编译 ArkLink hook DLL")
     parser.add_argument("--cc", default="", help="g++ 路径")
@@ -95,28 +117,20 @@ def main() -> int:
     compiler = find_compiler(args.cc)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        compiler,
-        "-shared",
-        "-std=c++17",
-        "-DUNICODE",
-        "-D_UNICODE",
-        "-Wall",
-        "-Wextra",
-        "-o",
-        str(OUT),
-        str(SRC),
-        "-lshell32",
-        "-lole32",
-        "-static-libgcc",
-        "-static-libstdc++",
-    ]
-    if args.debug:
-        cmd += ["-g", "-O0"]
+    if IS_WINDOWS:
+        cmd = [
+            compiler, "-shared", "-std=c++17", "-DUNICODE", "-D_UNICODE",
+            "-Wall", "-Wextra", "-o", str(OUT), str(SRC),
+            "-lshell32", "-lole32", "-static-libgcc", "-static-libstdc++",
+        ]
+        cmd += ["-g", "-O0"] if args.debug else ["-O2", "-s"]
+        cmd.append("-static")
     else:
-        cmd += ["-O2", "-s"]
-    # -static-libgcc/-static-libstdc++ 已经足够：只剩 kernel32/shell32 这类系统 DLL
-    cmd.append("-static")
+        cmd = [
+            compiler, "-shared", "-fPIC", "-std=c++17", "-Wall", "-Wextra",
+            "-pthread", "-o", str(OUT), str(SRC),
+        ]
+        cmd += ["-g", "-O0"] if args.debug else ["-O2"]
 
     print(" ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -127,7 +141,7 @@ def main() -> int:
         return proc.returncode
 
     size = OUT.stat().st_size
-    names = exports_of(OUT)
+    names = exports_of(OUT) if IS_WINDOWS else posix_exports(OUT)
     print(f"已生成 {OUT}（{size} 字节）")
     print(f"导出：{', '.join(sorted(names)) or '(无)'}")
     required = {"ArkLinkPrepareUnload", "ArkLinkHookVersion"}
