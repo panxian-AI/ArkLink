@@ -781,8 +781,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--to", required=True, help="收件人：备注 / QQ 号 / uid（必须在白名单里）")
     p_send.add_argument("--text", required=True, help="消息内容（纯文本，或 OneBot 段数组的 JSON）")
     p_send.add_argument("--uin", default="1000000001", help="发送账号（默认 1000000001）")
-    p_send.add_argument("--engine", choices=["host", "pipe", "dry-run"], default="host",
-                        help="怎么发：host=操作官方客户端（默认）")
+    p_send.add_argument("--engine", choices=["host", "pipe", "x11", "dry-run"], default="host",
+                        help="怎么发：host=操作官方客户端；x11=Xvfb 里用 xdotool（无头 Linux）")
     p_send.add_argument("--yes", action="store_true", help="真的发出去（不加只演练）")
     p_send.add_argument("--dry-run", action="store_true", help="强制演练")
     p_send.add_argument("--echo", default="", help="回显字段")
@@ -798,8 +798,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--report", default="", help="HTTP 上报地址，逗号分隔")
     p_serve.add_argument("--heartbeat", type=float, default=30.0, help="心跳间隔秒，0 = 关")
     p_serve.add_argument("--set", action="append", metavar="K=V", help="传给适配器的参数，可重复（值按 JSON 解析）")
-    p_serve.add_argument("--engine", choices=["host", "pipe", "dry-run"], default="host",
-                         help="webui 用哪个发送引擎（默认 host）")
+    p_serve.add_argument("--engine", choices=["host", "pipe", "x11", "dry-run"], default="host",
+                         help="webui 用哪个发送引擎（默认 host；无头 Linux 用 x11）")
     p_serve.add_argument("--password", default="", help="webui 登录口令（留空则不校验）")
     p_serve.set_defaults(func=lambda a: _serve_webui(a) if a.kind == "webui" else _serve(a))
 

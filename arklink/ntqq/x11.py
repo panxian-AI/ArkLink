@@ -1,0 +1,187 @@
+"""X11 引擎：把 QQ 关进一个「只有它自己」的 X 会话里，再用 xdotool 操作。
+
+为什么需要它：Windows 上的 UI 通道必须抢前台焦点，这是「不影响其他程序」的硬冲突。
+换到一台无头 Linux（Xvfb 虚拟屏幕 + QQ Linux 版）之后，抢占焦点这件事**失去了意义**——
+那个屏幕里只有 QQ，没有任何别人在用的窗口。宿主机的焦点、剪贴板、前台程序一概不受影响。
+
+链路：
+
+    xdotool search --name QQ       找窗口
+    xdotool windowactivate <id>    在 Xvfb 里激活（相当于本地窗口，无外部影响）
+    xdotool mousemove --window ... 点会话搜索框 / 第一条结果 / 输入框
+    xdotool type --clearmodifiers  输入收件人与正文（不经过系统剪贴板）
+    xdotool key Return             发送
+
+依赖只有 `xdotool`（Debian: `apt install xdotool`）和 `DISPLAY` 指向那个虚拟屏幕。
+没有 `xdotool` 或 `DISPLAY` 不通时，`available` 为 False，上层换通道即可。
+
+⚠️ 这套流程的坐标假设与 Windows 版一致（会话搜索框在左上、输入框在底部），
+窗口大小变了就用 `input_xy` / `search_xy` 校准；校不准就退回 `WindowsHost`。
+
+物理隔离 vs 虚拟屏幕：
+* Xvfb（推荐）：无 GPU、无桌面、内存占用小，配 `x11vnc` 只用来首次扫码；
+* 完整虚拟机：隔离更彻底，但要多跑一个内核与桌面，没必要。
+
+首次登录必须扫码：QQ Linux 版没有「密码登录」以外的免交互通道，所以第一次要么
+用 `x11vnc` 连上去扫，要么把 `data/` 目录（登录态）拷进来。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import subprocess
+import time
+from typing import Any, Callable, Sequence
+
+from .send import SendRequest, SendResult
+
+logger = logging.getLogger("arklink.ntqq.x11")
+
+#: 会话列表顶部的搜索框（相对窗口左上角，默认布局）
+DEFAULT_SEARCH_XY = (150, 65)
+#: 聊天输入框（窗口比例，默认布局）
+DEFAULT_INPUT_XY = (0.65, 0.87)
+
+
+class X11Engine:
+    """用 xdotool 操作 Xvfb 里的 QQ。名字与 `SendEngine` 协议一致。"""
+
+    name = "x11"
+
+    def __init__(
+        self,
+        *,
+        display: str = "",
+        window_name: str = "QQ",
+        search_xy: tuple[int, int] = DEFAULT_SEARCH_XY,
+        input_xy: tuple[float, float] = DEFAULT_INPUT_XY,
+        type_delay: int = 15,
+        open_delay: float = 0.7,
+        dry_run: bool = False,
+        runner: Callable[[Sequence[str]], subprocess.CompletedProcess] | None = None,
+        min_gap: float = 0.35,
+    ) -> None:
+        self.display = display or os.environ.get("ARKLINK_X11_DISPLAY", "") or os.environ.get("DISPLAY", "")
+        self.window_name = window_name
+        self.search_xy = (int(search_xy[0]), int(search_xy[1]))
+        self.input_xy = (float(input_xy[0]), float(input_xy[1]))
+        self.type_delay = int(type_delay)
+        self.open_delay = float(open_delay)
+        self.dry_run = dry_run
+        self.min_gap = float(min_gap)
+        self._run_impl = runner or self._default_run
+        self._last = 0.0
+        self.last_action = ""
+
+    # ---------------------------------------------------------------- 底层
+    def _default_run(self, args: Sequence[str]) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        if self.display:
+            env["DISPLAY"] = self.display
+        return subprocess.run(list(args), capture_output=True, text=True, timeout=20, env=env)
+
+    def _xdo(self, *args: str) -> subprocess.CompletedProcess:
+        cmd = ["xdotool", *args]
+        try:
+            return self._run_impl(cmd)
+        except Exception as exc:  # 没装 / DISPLAY 不通
+            logger.debug("xdotool 执行失败 %s：%s", args, exc)
+            return subprocess.CompletedProcess(cmd, 127, "", str(exc))
+
+    @property
+    def available(self) -> bool:
+        if not shutil.which("xdotool") and self._run_impl is self._default_run:
+            return False
+        if not self.display and self._run_impl is self._default_run:
+            return False
+        return bool(self.find_window())
+
+    # ---------------------------------------------------------------- 窗口
+    def find_window(self) -> str:
+        """找 QQ 主窗口 id（可能多个，取最后一个 = 最上层）。"""
+        proc = self._xdo("search", "--name", self.window_name)
+        if proc.returncode != 0:
+            return ""
+        ids = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+        return ids[-1] if ids else ""
+
+    def _activate(self, wid: str) -> bool:
+        proc = self._xdo("windowactivate", "--sync", wid)
+        return proc.returncode == 0
+
+    def _geometry(self, wid: str) -> tuple[int, int]:
+        proc = self._xdo("getwindowgeometry", "--shell", wid)
+        if proc.returncode != 0:
+            return (0, 0)
+        values: dict[str, int] = {}
+        for line in (proc.stdout or "").splitlines():
+            key, _, raw = line.partition("=")
+            if raw.strip().lstrip("-").isdigit():
+                values[key.strip()] = int(raw.strip())
+        return (values.get("WIDTH", 0), values.get("HEIGHT", 0))
+
+    # ---------------------------------------------------------------- 动作
+    def _click(self, wid: str, x: int, y: int) -> None:
+        # --window 让坐标相对该窗口，不需要真实光标移动
+        self._xdo("mousemove", "--window", wid, str(int(x)), str(int(y)))
+        self._xdo("click", "--window", wid, "1")
+
+    def _type(self, text: str) -> None:
+        # 注意：type 走的是 X 键盘事件，不碰系统剪贴板
+        self._xdo("type", "--clearmodifiers", "--delay", str(self.type_delay), text)
+
+    async def send(self, request: SendRequest) -> SendResult:
+        return self._send_blocking(request)
+
+    def _send_blocking(self, request: SendRequest) -> SendResult:
+        text = request.text
+        if not text:
+            return SendResult(ok=False, code=1400, msg="空消息", engine=self.name, echo=request.echo)
+        if self.dry_run:
+            self.last_action = f"[dry-run] x11 → {request.search_key}: {text[:40]!r}"
+            logger.info(self.last_action)
+            return SendResult(ok=True, dry_run=True, engine=self.name, text=text, echo=request.echo,
+                              msg="dry-run：没有真的发送")
+
+        gap = self.min_gap - (time.time() - self._last)
+        if gap > 0:
+            time.sleep(gap)
+
+        wid = self.find_window()
+        if not wid:
+            return SendResult(ok=False, code=1404, msg=f"X11 里找不到窗口 {self.window_name!r}（DISPLAY={self.display}）",
+                              engine=self.name, text=text, echo=request.echo)
+        if not self._activate(wid):
+            return SendResult(ok=False, code=1404, msg="激活窗口失败（Xvfb 没起？）",
+                              engine=self.name, text=text, echo=request.echo)
+
+        width, height = self._geometry(wid)
+        if width <= 0 or height <= 0:
+            width, height = 1000, 800  # 拿不到尺寸就按默认比例点，失败会体现在结果里
+
+        # 1) 会话搜索 → 2) 第一条结果 → 3) 输入框 → 4) 正文 → 5) 回车
+        self._click(wid, self.search_xy[0], self.search_xy[1])
+        time.sleep(0.25)
+        self._type(str(request.search_key))
+        time.sleep(self.open_delay)
+        self._click(wid, self.search_xy[0] + 60, self.search_xy[1] + 91)
+        time.sleep(self.open_delay + 0.3)
+        self._click(wid, int(width * self.input_xy[0]), int(height * self.input_xy[1]))
+        time.sleep(0.15)
+        self._type(text)
+        time.sleep(0.15)
+        self._xdo("key", "--clearmodifiers", "Return")
+        self._last = time.time()
+        self.last_action = f"x11 → {request.search_key}: {len(text)} 字"
+        logger.info(self.last_action)
+        return SendResult(
+            ok=True,
+            message_id=0,
+            msg="已通过 X11 通道发送",
+            engine=self.name,
+            text=text,
+            echo=request.echo,
+            extra={"via": "x11", "window": wid, "display": self.display},
+        )

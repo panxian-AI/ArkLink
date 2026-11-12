@@ -354,6 +354,10 @@ def engine_from_config(
         return PipeEngine(client)
     if kind in ("host", "client", "ui"):
         return HostEngine(dry_run=dry_run, uin=uin, candidates=candidates)
+    if kind in ("x11", "xdotool", "xvfb"):
+        from .x11 import X11Engine  # 延迟导入：Windows 上没有 xdotool
+
+        return X11Engine(dry_run=dry_run)
     return HostEngine(dry_run=dry_run, uin=uin, candidates=candidates)
 
 

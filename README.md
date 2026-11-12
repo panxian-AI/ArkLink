@@ -138,8 +138,15 @@ python -m arklink serve webui --port 6800 --password 你的口令   # 浏览器�
 发送走**官方客户端本身**（认账号窗口 → 搜索会话 → 粘贴 → 回车），消息由客户端产生，
 不拼包、不伪造协议；账号/收件人/群聊三条硬闸门写在代码里，突发连发与多对象由引擎
 排队串行（保序）。WebUI 有口令登录、状态/配置/日志/发送/体检一页，支持多收件人多条。
-**限制**：这条路要抢前台焦点，做不到"最小化后台发送"——那件事要靠进程内直调，
-列在 [docs/发消息链路.md](docs/发消息链路.md) 的 1.0 清单里。
+**限制**：Windows 上这条路要抢前台焦点，做不到"最小化后台发送"。要真正后台、
+不打扰宿主机的任何程序，把 QQ 放进无头 Linux 的虚拟屏幕里跑：
+
+```bash
+python -m arklink send --to 示例好友 --text "hi" --engine x11 --yes
+```
+
+配方（Debian 12 + Xvfb + QQ Linux + xdotool，含 Dockerfile）见
+[docs/无头Linux运行.md](docs/无头Linux运行.md)。
 
 ### Linux
 
@@ -268,6 +275,7 @@ tests/
 | [docs/Milky接入.md](docs/Milky接入.md) | Milky 配置、映射表、协议差异、排障 |
 | [docs/Satori接入.md](docs/Satori接入.md) | Satori 配置、XML 编码、id 映射、能力对照 |
 | [docs/发消息链路.md](docs/发消息链路.md) | 三条发送路线、UI 通道踩坑、进程内直调逆向结论、1.0 清单 |
+| [docs/无头Linux运行.md](docs/无头Linux运行.md) | 无头 Linux 跑 QQ、Xvfb + xdotool 配方、Dockerfile、已知坑 |
 
 ## 合规与安全
 
