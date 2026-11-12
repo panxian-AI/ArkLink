@@ -25,6 +25,15 @@ max_backoff = 60.0
 # signer_url = "http://127.0.0.1:8080"
 # allow_login = false                   # 置 true 也只是打印缺失清单
 
+# ---------- 3.5 操作已登录的官方客户端（最后一条通知腿） ----------
+# 只发文本、只发不收；客户端在线即算健康，不碰 QQ 内部，不注入
+# [[adapters]]
+# type = "ntqq-client"
+# dry_run = false                      # 默认 true：只记录不敲键盘，校准后再关
+# search_hotkey = "^f"                 # QQ NT 搜索；个别版本是 "^+f"
+# paste_hotkey = "^v"
+# process_names = ["QQ.exe"]
+
 # ---------- 4. 不装包时的点分路径写法 ----------
 # [[adapters]]
 # type = "arklink.milky:MilkyAdapter"

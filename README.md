@@ -7,6 +7,7 @@ ArkBot 的**协议外挂层**。三个通道、一套契约：
 | `milky` | Milky 1.3（NapCat / Lagrange / Acidify / LLOneBot） | ✅ 可用 |
 | `satori` | Satori v1（Koishi / Chronocat，顺带接上 Telegram/Discord） | ✅ 可用 |
 | `ntqq-native` | QQ NT 原生 SSO 协议（TEA / 封包 / qsign） | 🧪 研究态，不登录 |
+| `ntqq-client` | 操作**已登录的官方客户端**（Win32 键鼠，只发文本） | ⚠️ 可用，最后一条通知腿 |
 
 它不是又一个 bot 框架。业务插件写在 [ArkBot](https://github.com/panxian-AI/ArkBot) 里，
 本仓库只负责「协议 ↔ 统一事件」的翻译和逆向工具箱：
@@ -42,7 +43,7 @@ ArkBot 的**协议外挂层**。三个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 8 项自检，不联网
-pytest tests -q                   # 83 项测试
+pytest tests -q                   # 94 项测试
 ```
 
 ### 接一个 Milky 协议端
@@ -94,6 +95,7 @@ python -m arklink pb --hex 089601120361726b                  # 把 protobuf 拆�
 | `arklink/ntqq/pb.py` | protobuf 线格式编解码 + 人类可读 dump |
 | `arklink/ntqq/qsign.py` | 本地签名服务客户端（GET/POST 双路） |
 | `arklink/ntqq/native.py` | 拼包→加密→发→收→解密→解包 的完整管线（`selftest()` 有单测） |
+| `arklink/ntqq/host.py` | 操作已登录的官方客户端：进程/窗口探测、剪贴板粘贴、按键注入 |
 
 `NativeQQAdapter` 挂载后**永远不健康**：`call_api` 返回 `1404`，框架自动降级，
 不会抢占总通道。登录握手（`wtlogin`）、设备指纹、ECDH 密钥协商尚未实现，
@@ -109,7 +111,7 @@ arklink/
 ├── satori.py      Satori v1：/v1/* + WS opcode，XML 内容编解码
 ├── registry.py    type 名 → 工厂
 ├── __main__.py    probe / decode / pb / selftest
-└── ntqq/          TEA · SSO · protobuf · qsign · native
+└── ntqq/          TEA · SSO · protobuf · qsign · native · host
 docs/
 ├── 协议逆向分析.md  三层结构、官方开放协议、NTQQ 逆向、对拍清单
 ├── 挂载到ArkBot.md  三种挂载方式、契约、双通道配置、自己加协议
@@ -121,6 +123,7 @@ tests/
 ├── test_satori.py    内容编解码/事件/API
 ├── test_ntqq_tea.py  TEA 向量与往返
 ├── test_ntqq_sso.py  SSO 布局/protobuf/管线
+├── test_ntqq_host.py 客户端通道：结构体/热键/纯文本过滤
 └── test_mount.py     ★ 真实 ArkBot + 假协议端 的端到端挂载
 ```
 
@@ -128,7 +131,7 @@ tests/
 
 | 文档 | 内容 |
 |------|------|
-| [docs/协议逆向分析.md](docs/协议逆向分析.md) | 协议分层、官方开放协议能力与限制、NTQQ 封包/TEA/qsign、对拍清单 |
+| [docs/协议逆向分析.md](docs/协议逆向分析.md) | 协议分层、为什么影分身容易被踢、官方开放协议能力、NTQQ 封包/TEA/qsign、对拍清单 |
 | [docs/挂载到ArkBot.md](docs/挂载到ArkBot.md) | 三种挂载方式、适配器契约、双通道、加新协议 |
 | [docs/Milky接入.md](docs/Milky接入.md) | Milky 配置、映射表、协议差异、排障 |
 | [docs/Satori接入.md](docs/Satori接入.md) | Satori 配置、XML 编码、id 映射、能力对照 |

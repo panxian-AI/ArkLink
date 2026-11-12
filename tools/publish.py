@@ -46,6 +46,23 @@ def git(*args: str) -> str:
     ).stdout.strip()
 
 
+def git_bytes(*args: str) -> bytes:
+    return subprocess.run(["git", *args], capture_output=True, check=True).stdout
+
+
+def tracked_files() -> list[tuple[str, str, str]]:
+    """[(mode, sha, path)]，用 -z 避免中文路径被 git 加引号转义。"""
+    items: list[tuple[str, str, str]] = []
+    for raw in git_bytes("ls-tree", "-r", "-z", "HEAD").split(b"\x00"):
+        if not raw:
+            continue
+        meta, _, path = raw.partition(b"\t")
+        mode, otype, sha = meta.decode("ascii").split()
+        if otype == "blob":
+            items.append((mode, sha, path.decode("utf-8")))
+    return items
+
+
 def ensure_repo(token: str, repo: str) -> None:
     try:
         api("GET", f"/repos/{repo}", token)
@@ -80,16 +97,19 @@ def main() -> int:
         parent = api("GET", f"/repos/{repo}/commits/{branch}", token)["sha"]
         print(f"远程 {branch}: {parent[:7]}")
     except RuntimeError as e:
-        if "HTTP 404" not in str(e):
+        # 空仓库返回 409 "Git Repository is empty."，新仓库返回 404
+        if not any(code in str(e) for code in ("HTTP 404", "HTTP 409")):
             raise
-        print(f"远程 {branch} 为空，将创建首个提交")
+        print(f"远程 {branch} 为空：先建一个占位提交，Git Data API 才能写入 blob")
+        seed = api("PUT", f"/repos/{repo}/contents/.gitkeep", token, {
+            "message": "chore: init",
+            "content": base64.b64encode(b"").decode("ascii"),
+            "branch": branch,
+        })
+        parent = seed["commit"]["sha"]
 
     entries = []
-    for line in git("ls-tree", "-r", "HEAD").splitlines():
-        meta, path = line.split("\t", 1)
-        mode, otype, sha = meta.split()
-        if otype != "blob":
-            continue
+    for mode, sha, path in tracked_files():
         content = subprocess.run(
             ["git", "cat-file", "blob", sha], capture_output=True, check=True
         ).stdout

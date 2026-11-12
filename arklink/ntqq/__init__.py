@@ -5,16 +5,21 @@
     sso.py       SSO 封包头/尾布局
     qsign.py     本地签名服务客户端
     native.py    把上面几件串成「拼包 → 加密 → 发 → 收 → 解密 → 解包」的管线
+    host.py      操作「已登录的官方客户端」（只发文本），最后一条通知腿
 """
 
 from __future__ import annotations
 
+from .host import ClientHost, ClientHostAdapter, ClientInfo
 from .native import LoopbackTransport, NativeQQAdapter, SSOTransport
 from .qsign import QSignClient, QSignError, Signature
 from .sso import SSOPacket, cmd_name, iter_packets, register_cmd
 from .tea import decrypt_block, encrypt_block, qq_tea_decrypt, qq_tea_encrypt
 
 __all__ = [
+    "ClientHost",
+    "ClientHostAdapter",
+    "ClientInfo",
     "NativeQQAdapter",
     "LoopbackTransport",
     "SSOTransport",

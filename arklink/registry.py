@@ -14,6 +14,7 @@ ADAPTERS: dict[str, str] = {
     "milky": "arklink.milky:create",
     "satori": "arklink.satori:create",
     "ntqq-native": "arklink.ntqq.native:create",
+    "ntqq-client": "arklink.ntqq.host:create",
 }
 
 
