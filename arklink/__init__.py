@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 from .base import LinkAdapter  # noqa: E402
 from .registry import ADAPTERS, available, create  # noqa: E402

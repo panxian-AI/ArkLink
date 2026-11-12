@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import binascii
 import json
+import os
 import sys
 from typing import Any
 
@@ -237,6 +238,122 @@ def _roster(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _hook(args: argparse.Namespace) -> int:
+    """注入通道的四个动作：看进程 / 注入 / 探事件 / 卸载。"""
+    import time
+
+    from .ntqq import hookproc
+
+    def _list() -> int:
+        processes = hookproc.find_processes()
+        if not processes:
+            print("没有 QQ.exe 在跑（先手动登录 QQ 客户端）")
+            return 0
+        for item in processes:
+            tag = "主" if item.is_main else "  "
+            pipe = item.pipe or "-"
+            print(f"[{tag}] pid={item.pid:<7} 管道={pipe:<26} {item.pipe_state:<7} {item.cmdline[:64]}")
+        main = hookproc.pick_main(processes)
+        if main is not None:
+            print(f"\n建议注入：pid={main.pid}（管道 {main.pipe or '无'} / {main.pipe_state}）")
+        return 0
+
+    if args.list or not (args.inject or args.probe or args.unload):
+        return _list()
+
+    processes = hookproc.find_processes()
+    target = next((p for p in processes if p.pid == args.pid), None) if args.pid else hookproc.pick_main(processes)
+    if target is None:
+        print(f"找不到目标进程（pid={args.pid}）" if args.pid else "找不到 QQ 主进程", file=sys.stderr)
+        return 1
+    scanner = hookproc.ProcessScanner()
+
+    if args.inject:
+        dll = args.dll or hookproc.default_hook_dll()
+        if not dll:
+            print("找不到 hook DLL：编译 hookdll/ 或用 --dll 指定", file=sys.stderr)
+            return 1
+        try:
+            result = hookproc.Injector(scanner).inject(target.pid, dll, args.method)
+        except hookproc.HookError as exc:
+            print(f"注入失败：{exc}", file=sys.stderr)
+            return 1
+        print(f"已注入 pid={result.pid} → {result.dll}（base=0x{result.handle:x}）")
+        if result.note:
+            print(f"注意：{result.note}")
+        for _ in range(50):
+            if scanner.probe_pipe(target.pid) != "missing":
+                print("管道已就绪")
+                break
+            time.sleep(0.2)
+        else:
+            print("等了 10s 管道还没出现：DLL 可能没实现 control 管道，或 DllMain 里拒绝了加载", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.unload:
+        base = hookproc.Injector(scanner).module_loaded(target.pid, os.path.basename(args.dll or "snowluma-win32-x64.dll"))
+        if not base:
+            print("目标进程里没找到该模块，可能本来就是 manual map 注入的", file=sys.stderr)
+            return 1
+        ok = hookproc.Injector(scanner).unload(target.pid, base)
+        print("已卸载" if ok else "卸载失败")
+        return 0 if ok else 1
+
+    # --probe
+    return asyncio.run(_probe_hook(target.pid, args))
+
+
+async def _probe_hook(pid: int, args: argparse.Namespace) -> int:
+    import time as _time
+
+    from .ntqq import hookproc, push
+    from .ntqq.hookpipe import HookClient, PipeError
+
+    scanner = hookproc.ProcessScanner()
+    prefix = args.prefix
+    if not prefix:
+        name = scanner.pipe_name(pid)
+        prefix = name.split(".")[0] if name else "mojo"
+    client = HookClient(pid, prefix=prefix)
+    seen = 0
+
+    def on_packet(frame) -> None:
+        nonlocal seen
+        seen += 1
+        try:
+            event = push.to_onebot(frame.body, self_id=int(client.uin or 0))
+        except Exception as exc:  # 解析失败也要能看到原始包
+            event = {"parse_error": str(exc), "hex": frame.body[:64].hex()}
+        print(f"--- #{seen} {frame.cmd} seq={frame.value0} ---")
+        _print(event or {"hex": frame.body[:64].hex()})
+        if args.count and seen >= args.count:
+            raise KeyboardInterrupt
+
+    client.on_packet = on_packet
+    client.on_login_state = lambda f: print(f"[登录态] logged_in={f.logged_in} uin={f.uin}")
+    try:
+        hello_c, hello_r = await client.connect(timeout=5)
+    except (PipeError, OSError) as exc:
+        print(f"连接失败：{exc}", file=sys.stderr)
+        print("提示：先跑 `python -m arklink hook --inject`，或用 --prefix 指定管道前缀", file=sys.stderr)
+        return 1
+    print(f"已连接 pid={pid} control={hello_c.pipe_name} recv={hello_r.pipe_name}")
+    status = await client.request("arklink.ping", b"", want_reply=True, timeout=3) if args.ping else None
+    if status is not None:
+        print(f"ping → status={status.status} {status.msg} body={status.body[:120]!r}")
+    deadline = _time.monotonic() + args.seconds
+    try:
+        while _time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await client.close()
+    print(f"共收到 {seen} 条消息包")
+    return 0
+
+
 def _default_appid() -> int:
     from .ntqq.code2d import APP_ID
 
@@ -292,6 +409,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_roster.add_argument("--json", action="store_true")
     p_roster.add_argument("--dry-run", action="store_true", help="只打印 OIDB 请求体")
     p_roster.set_defaults(func=_roster)
+
+    p_hook = sub.add_parser("hook", help="注入通道：查进程 / 注入 / 探事件 / 卸载")
+    p_hook.add_argument("--list", action="store_true", help="列出 QQ 进程与管道状态")
+    p_hook.add_argument("--inject", action="store_true", help="注入 hook DLL")
+    p_hook.add_argument("--probe", action="store_true", help="连上管道并打印收到的消息包")
+    p_hook.add_argument("--unload", action="store_true", help="卸载已注入的模块")
+    p_hook.add_argument("--pid", type=int, default=0, help="目标进程（默认自动挑主进程）")
+    p_hook.add_argument("--dll", default="", help="hook DLL 路径（默认自动找）")
+    p_hook.add_argument("--method", default="loadlibrary", help="注入方式")
+    p_hook.add_argument("--prefix", default="", help="管道前缀（默认自动探测 mojo/arklink）")
+    p_hook.add_argument("--seconds", type=float, default=30.0, help="--probe 监听时长")
+    p_hook.add_argument("--count", type=int, default=0, help="收到 N 条后退出")
+    p_hook.add_argument("--ping", action="store_true", help="--probe 时先发一个 ping 请求")
+    p_hook.set_defaults(func=_hook)
     return parser
 
 

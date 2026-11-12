@@ -15,6 +15,7 @@ ADAPTERS: dict[str, str] = {
     "satori": "arklink.satori:create",
     "ntqq-native": "arklink.ntqq.native:create",
     "ntqq-client": "arklink.ntqq.host:create",
+    "ntqq-hook": "arklink.ntqq.hook:create",
 }
 
 

@@ -1,11 +1,12 @@
 # ArkLink
 
-ArkBot 的**协议外挂层**。三个通道、一套契约：
+ArkBot 的**协议外挂层**。四个通道、一套契约：
 
 | 通道 | 用途 | 状态 |
 |------|------|------|
 | `milky` | Milky 1.3（NapCat / Lagrange / Acidify / LLOneBot） | ✅ 可用 |
 | `satori` | Satori v1（Koishi / Chronocat，顺带接上 Telegram/Discord） | ✅ 可用 |
+| `ntqq-hook` | 检测官方 QQ 进程 → 注入自研 DLL → 管道收推送 | 🟡 链路已通真机，收包侧待接内核 API |
 | `ntqq-native` | QQ NT 原生 SSO：扫码登录 / 只读花名册 / 收推送 | 🟡 只读可用，不发消息 |
 | `ntqq-client` | 操作**已登录的官方客户端**（Win32 键鼠，只发文本） | ⚠️ 可用，最后一条通知腿 |
 
@@ -43,7 +44,7 @@ ArkBot 的**协议外挂层**。三个通道、一套契约：
 git clone https://github.com/panxian-AI/ArkLink && cd ArkLink
 pip install -e ".[test]"
 python -m arklink selftest        # 13 项自检，不联网
-pytest tests -q                   # 133 项测试
+pytest tests -q                   # 154 项测试
 ```
 
 ### 接一个 Milky 协议端
@@ -92,6 +93,20 @@ python -m arklink roster --json            # 好友 + 群，验证票据是否�
 发消息故意不做（要过 A2 校验和频率风控，出问题无法定位），
 详见 [docs/扫码登录.md](docs/扫码登录.md)。
 
+### 注入通道：自己登 QQ → 检测进程 → 注入 → 收推送
+
+```bash
+python tools/build_hook.py                                        # 编译自研 hook DLL
+python -m arklink hook --list                                     # 找 QQ 主进程 + 探管道
+python -m arklink hook --inject --dll hookdll/build/arklink-hook-x64.dll
+python -m arklink hook --probe --prefix arklink --seconds 30 --ping
+```
+
+思路来自对 SnowLuma 的逆向：DLL 注入 QQNT 主进程、起两条命名管道对外通信。
+我们把这套结构自研复刻（自己的帧协议、自己的 DLL），并与 `ntqq-native` 的
+`push.to_onebot` 打通。协议格式、真机步骤和踩坑记录见
+[docs/进程注入通道.md](docs/进程注入通道.md)。
+
 ## 逆向工具箱
 
 ```bash
@@ -114,6 +129,8 @@ python -m arklink pb --hex 089601120361726b                  # 把 protobuf 拆�
 | `arklink/ntqq/push.py` | 推送 `MsgPush` → OneBot 11 事件（段/撤回，未知段不丢事件） |
 | `arklink/ntqq/native.py` | 把上面几件串起来：拼包→加密→发→收→解密→解包，登录/只读/收推送 |
 | `arklink/ntqq/host.py` | 操作已登录的官方客户端：进程/窗口探测、剪贴板粘贴、按键注入 |
+| `arklink/ntqq/hook*.py` | 注入通道：帧协议 / 进程发现 / 注入卸载 / 管道客户端 / 适配器 |
+| `hookdll/` | 自研 hook DLL（C++，管道服务端 + ping/status + uin 探测），`tools/build_hook.py` 编译 |
 
 `ntqq-native` 是**只读通道**：能扫码、能拉好友/群、能收推送；`send_*` 一律返回 `1404`，
 框架自动换通道。设备指纹与发送侧风控仍未做，差距清单见
