@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arklink"
-version = "0.12.0"
+version = "0.13.0"
 description = "QQ bot 运行时：收发消息 + 白名单 + 给上层调用的 HTTP/SDK（含 Milky / Satori 适配与 QQ NT 逆向工具）"
 readme = "README.md"
 requires-python = ">=3.11"

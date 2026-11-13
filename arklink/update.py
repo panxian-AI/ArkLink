@@ -152,6 +152,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature("standalone", "0.11.0", "自助使用：policy.json + arklink peers + arklink start + 双击启动"),
     Feature("bot", "0.12.0", "bot 运行时：MessageBus + arklink bot new/run/check + 能力矩阵"),
     Feature("api", "0.12.0", "给别人调用的 HTTP + SSE 接口（v1）与 Python SDK"),
+    Feature("server", "0.13.0", "小服务器直装部署（无虚拟机：systemd + QQ 看护 + 登录态持久化）"),
 )
 
 _FEATURE_BY_KEY = {f.key: f for f in FEATURES}

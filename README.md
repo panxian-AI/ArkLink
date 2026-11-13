@@ -218,6 +218,20 @@ python -m arklink env status               # 状态、端口、虚拟盘真实�
 WebUI 与 SSH 只映射到 `127.0.0.1`；剪贴板与拖放默认关闭。`destroy` 必须 `--yes`。
 细节与卡点见 [docs/内置虚拟环境.md](docs/内置虚拟环境.md)。
 
+### 部署到小服务器（长期前台运行版）
+
+不想背一台虚拟机、想 7×24 挂着？把 ArkLink **直接装在小服务器上**（2 核 2GB 就够），
+不需要 VirtualBox、不需要虚拟机——装完即是「长期前台运行」：
+
+```bash
+sudo bash tools/setup_server.sh --source /path/to/ArkLink --qq-deb /tmp/QQ_xxx_amd64.deb
+```
+
+三层保障：systemd 开机自启 · QQ 看护崩溃自拉起（60 秒防抖）· 登录态每日备份/重启自动还原
+（扫一次码长期有效）。浏览器打开 `http://<服务器IP>:6800` 就是前台操作版，
+上层程序接 `:6900` 的 API。安全清单、迁移、FAQ 见
+[docs/部署到服务器.md](docs/部署到服务器.md)。
+
 ### Linux
 
 同一套代码在 Linux 上也能跑：进程发现走 `/proc`，管道换成 Unix domain socket
