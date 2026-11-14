@@ -341,11 +341,18 @@ class EnvManager:
             return "dry-run"
         name = self.plan.name
         target = "/opt/ArkLink"
-        cmds = copyto_commands(name, os.path.abspath(source), target,
-                              user=self.state.user, password=password)
+        user = self.state.user
+        # /opt 归 root，先提权建目录并交给登录用户，copyto 才写得进去
+        cmds = guest_run_commands(
+            name,
+            f"sudo mkdir -p {target} && sudo chown {user}:{user} {target}",
+            user=user, password=password,
+        )
+        cmds += copyto_commands(name, os.path.abspath(source), target,
+                                user=user, password=password)
         cmds += guest_run_commands(
             name,
             f"sudo bash {target}/{script} --source {target}",
-            user=self.state.user, password=password,
+            user=user, password=password,
         )
         return "\n".join(self.require_box().apply(cmds, timeout=3600))

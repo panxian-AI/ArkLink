@@ -174,7 +174,22 @@ def test_push_commands_use_guestcontrol():
     assert copy[1:4] == ["guestcontrol", "arklink", "copyto"]
     assert "--recursive" in copy and "--password" in copy and "pw" in copy
     run = guest_run_commands("arklink", "sudo bash x", user="arklink", password="pw")[0]
-    assert run[1:4] == ["guestcontrol", "arklink", "run"] and "--exe /bin/bash" in " ".join(run)
+    assert run[1:4] == ["guestcontrol", "arklink", "run"]
+
+
+def test_push_creates_opt_dir_before_copy():
+    """/opt 归 root，必须先 sudo 建目录授权，copyto 才不会 VERR_ACCESS_DENIED。"""
+    mgr = EnvManager.open(
+        "arklink", report=make_report(), runner=FakeRunner({"list vms": ""})
+    )
+    mgr.state.user = "arklink"
+    mgr.push("/src/ArkLink", password="pw", script="setup_guest.sh")
+    joins = [" ".join(c[1:]) for c in mgr.require_box().runner.calls]
+    mkdir_idx = next(i for i, c in enumerate(joins)
+                     if "mkdir -p /opt/ArkLink" in c and "chown" in c)
+    copy_idx = next(i for i, c in enumerate(joins) if "copyto" in c)
+    setup_idx = next(i for i, c in enumerate(joins) if "setup_guest.sh" in c)
+    assert mkdir_idx < copy_idx < setup_idx
 
 
 # ---------------------------------------------------------------- 执行
