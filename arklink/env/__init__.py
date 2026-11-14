@@ -193,7 +193,11 @@ def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
                     # 不能从头写——那样每次重试都白费。改成把响应流里已下过的
                     # 字节**跳过**再续写，进度照样累积（QQ 包下载实测踩过）。
                     skip = have
-                total = int(resp.headers.get("Content-Length") or 0) + have
+                # 206：Content-Length 是「剩余部分」，总长要加已下的；
+                # 200 全量流：Content-Length 就是整个文件长度（不能再加 have，
+                # 否则 done 永远追不上 total，会无限重试）。
+                chunk_len = int(resp.headers.get("Content-Length") or 0)
+                total = (chunk_len + have) if resumed else chunk_len
                 mode = "ab" if have else "wb"
                 done = have
                 last = 0.0
@@ -203,6 +207,8 @@ def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
                         if not block:
                             break  # 服务器给的比已下过的还少：数据不对劲，重试
                         skip -= len(block)
+                    if skip:  # 没跳完就没数据了：这条流是残的，按中断处理
+                        raise OSError("连接提前结束（续传跳过阶段）")
                     while True:
                         block = resp.read(1 << 20)
                         if not block:
@@ -215,6 +221,12 @@ def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
                             log(f"  下载 {done / 1024**2:.0f}/{total / 1024**2:.0f} MB "
                                 f"({done * 100 // total}%)"
                                 + ("（续传）" if have else ""))
+                if total and done < total:
+                    # 关键：连接被「干净地」提前掐断时 read() 会返回 b""，
+                    # 看着像下载完成，其实是半截文件——拿它去验 SHA 必然失败，
+                    # 然后从头重下，永远下不完（QQ 包 177MB 反复卡在这）。
+                    # 这里按中断处理：保留 .part，下一轮接着续。
+                    raise OSError(f"连接提前结束：{done}/{total} 字节")
         except Exception as exc:  # 断线、超时、5xx 都按「下次接着下」处理
             last_error = str(exc)
             size = os.path.getsize(tmp) if os.path.isfile(tmp) else 0

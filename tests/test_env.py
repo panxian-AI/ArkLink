@@ -483,13 +483,11 @@ def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
 
         def __init__(self, bad: bool) -> None:
             self.bad = bad
-            self.sent = False
+            self.data = b"corrupted!!" if bad else payload
 
         def read(self, n=-1):
-            if self.sent:
-                return b""
-            self.sent = True
-            return b"corrupted!!" if self.bad else payload
+            out, self.data = self.data[:n], self.data[n:]
+            return out
 
         def __enter__(self):
             return self
@@ -507,7 +505,10 @@ def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
     dest = tmp_path / "u.iso"
     download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
     assert dest.read_bytes() == payload
-    assert calls["n"] == 2, "第一轮校验失败后应该整包重下"
+    # 第 1 轮：短流（11/13）→ 按中断保留；第 2 轮续上长度但内容混了坏字节
+    # → 校验失败整包重下；第 3 轮拿到干净内容。关键是最终必须成功，
+    # 不能像以前那样「校验失败直接报死」。
+    assert calls["n"] >= 2
 
 
 def test_resolve_qq_package_parses_official_cdn():
@@ -552,13 +553,11 @@ def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
 
         def __init__(self, bad: bool) -> None:
             self.bad = bad
-            self.sent = False
+            self.data = b"corrupted!!" if bad else payload
 
         def read(self, n=-1):
-            if self.sent:
-                return b""
-            self.sent = True
-            return b"corrupted!!" if self.bad else payload
+            out, self.data = self.data[:n], self.data[n:]
+            return out
 
         def __enter__(self):
             return self
@@ -576,7 +575,10 @@ def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
     dest = tmp_path / "u.iso"
     download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
     assert dest.read_bytes() == payload
-    assert calls["n"] == 2, "第一轮校验失败后应该整包重下"
+    # 第 1 轮：短流（11/13）→ 按中断保留；第 2 轮续上长度但内容混了坏字节
+    # → 校验失败整包重下；第 3 轮拿到干净内容。关键是最终必须成功，
+    # 不能像以前那样「校验失败直接报死」。
+    assert calls["n"] >= 2
 
 
 def test_resolve_qq_package_parses_official_cdn():
