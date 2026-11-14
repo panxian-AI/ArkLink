@@ -70,6 +70,8 @@ class X11Engine:
         window_name: str = "QQ",
         search_xy: tuple[int, int] = DEFAULT_SEARCH_XY,
         input_xy: tuple[float, float] = DEFAULT_INPUT_XY,
+        #: QQ 搜索结果的独立弹窗标题（点结果要按它的坐标，不能按主窗口的）
+        search_popup_name: str = "综合搜索",
         type_delay: int = 15,
         open_delay: float = 0.7,
         #: 粘完附件等多久再回车：客户端要先把文件挂到输入框上
@@ -80,6 +82,7 @@ class X11Engine:
     ) -> None:
         self.display = display or os.environ.get("ARKLINK_X11_DISPLAY", "") or os.environ.get("DISPLAY", "")
         self.window_name = window_name
+        self.search_popup_name = search_popup_name
         self.search_xy = (int(search_xy[0]), int(search_xy[1]))
         self.input_xy = (float(input_xy[0]), float(input_xy[1]))
         self.type_delay = int(type_delay)
@@ -148,12 +151,53 @@ class X11Engine:
 
     # ---------------------------------------------------------------- 窗口
     def find_window(self) -> str:
-        """找 QQ 主窗口 id（可能多个，取最后一个 = 最上层）。"""
+        """找 QQ 主窗口 id。
+
+        QQ 会有一堆同名/近名窗口（Chromium 辅助窗口 1x1、搜索弹窗、
+        各种页面弹窗），按「最后一个」抓必翻车（Windows 宿主侧踩过同款坑）。
+        这里按窗口面积过滤 + 面积最大的优先；同面积时精确同名优先。
+        """
         proc = self._xdo("search", "--name", self.window_name)
         if proc.returncode != 0:
             return ""
         ids = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
-        return ids[-1] if ids else ""
+        best, best_key = "", (0, False)
+        for wid in ids:
+            w, h = self._size(wid)
+            if w < 400 or h < 300:  # 真主窗口不可能比这还小
+                continue
+            exact = self._window_name(wid) == self.window_name
+            key = (w * h, exact)
+            if key > best_key:
+                best, best_key = wid, key
+        return best
+
+    def _size(self, wid: str) -> tuple[int, int]:
+        proc = self._xdo("getwindowgeometry", "--shell", wid)
+        values: dict[str, int] = {}
+        for line in (proc.stdout or "").splitlines():
+            key, _, raw = line.partition("=")
+            if key.strip() in ("WIDTH", "HEIGHT") and raw.strip().isdigit():
+                values[key.strip()] = int(raw.strip())
+        return values.get("WIDTH", 0), values.get("HEIGHT", 0)
+
+    def _window_name(self, wid: str) -> str:
+        return (self._xdo("getwindowname", wid).stdout or "").strip()
+
+    def _find_popup(self) -> str:
+        """QQ 的搜索结果是一个独立 X 窗口（默认标题「综合搜索」）。"""
+        proc = self._xdo("search", "--name", self.search_popup_name)
+        if proc.returncode != 0:
+            return ""
+        ids = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+        best, best_area = "", 0
+        for wid in ids:
+            w, h = self._size(wid)
+            if w < 300 or h < 300:
+                continue
+            if w * h > best_area:
+                best, best_area = wid, w * h
+        return best
 
     def _activate(self, wid: str) -> bool:
         proc = self._xdo("windowactivate", "--sync", wid)
@@ -228,8 +272,23 @@ class X11Engine:
         time.sleep(0.25)
         self._type(str(request.search_key))
         time.sleep(self.open_delay)
-        self._click(wid, self.search_xy[0] + 60, self.search_xy[1] + 91)
-        time.sleep(self.open_delay + 0.3)
+        # 搜索结果是独立弹窗（标题见 search_popup_name），叠在主窗口上方——
+        # 按主窗口坐标点「第一条结果」和输入框会全落进弹窗（真机踩过的坑）
+        popup = self._find_popup()
+        if popup:
+            pw, ph = self._size(popup)
+            # 结果列表在弹窗搜索框下方，取左上区域第一条
+            self._click(popup, max(60, int(pw * 0.15)), min(200, int(ph * 0.25)))
+            time.sleep(self.open_delay + 0.3)
+            # 点中结果后弹窗应自动关；没关就按 Escape 收掉，防止挡住输入框
+            if self._find_popup():
+                self._xdo("key", "--clearmodifiers", "Escape")
+                time.sleep(0.3)
+        else:
+            self._click(wid, self.search_xy[0] + 60, self.search_xy[1] + 91)
+            time.sleep(self.open_delay + 0.3)
+        # 选完会话把主窗口重新拉到前台，输入框的点击/键盘才进得去
+        self._activate(wid)
         self._click(wid, int(width * self.input_xy[0]), int(height * self.input_xy[1]))
         time.sleep(0.15)
         if text:

@@ -21,6 +21,8 @@ class FakeRunner:
         self.width = width
         self.height = height
         self.fail_on: str | None = None
+        #: 多窗口场景：{id: (title, w, h)}；空 dict 时退回单窗口模式
+        self.windows: dict[str, tuple[str, int, int]] = {}
 
     def __call__(self, args):
         cmd = list(args)
@@ -28,9 +30,25 @@ class FakeRunner:
         if self.fail_on and self.fail_on in cmd:
             return subprocess.CompletedProcess(cmd, 1, "", "boom")
         if cmd[1:3] == ["search", "--name"]:
+            if self.windows:
+                import re
+
+                pattern = cmd[3]
+                hits = [wid for wid, (title, _w, _h) in self.windows.items()
+                        if re.search(pattern, title)]
+                return subprocess.CompletedProcess(cmd, 0, "\n".join(hits) + ("\n" if hits else ""), "")
             return subprocess.CompletedProcess(cmd, 0, f"{self.window}\n", "")
+        if cmd[1] == "getwindowname":
+            wid = cmd[2] if len(cmd) > 2 else ""
+            name = self.windows.get(wid, (self.window, 0, 0))[0]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}\n", "")
         if cmd[1] == "getwindowgeometry":
-            out = f"WIDTH={self.width}\nHEIGHT={self.height}\n"
+            wid = cmd[-1]  # xdotool getwindowgeometry --shell <id>
+            if self.windows and wid in self.windows:
+                _, w, h = self.windows[wid]
+            else:
+                w, h = self.width, self.height
+            out = f"WIDTH={w}\nHEIGHT={h}\n"
             return subprocess.CompletedProcess(cmd, 0, out, "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -88,11 +106,47 @@ def test_activate_failure_reports():
     assert not r.ok and "激活窗口失败" in r.msg
 
 
-def test_geometry_fallback_still_acts():
+def test_zero_size_window_is_not_a_main_window():
+    """1x1 / 0x0 的辅助窗口不是主窗口：宁可报 404，也不要往幽灵窗口里打字。"""
     runner = FakeRunner(width=0, height=0)
     engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
     r = asyncio.run(engine.send(_req()))
+    assert not r.ok and r.code == 1404
+
+
+def test_find_window_picks_largest_not_last():
+    """QQ 有一堆同名窗口（1x1 辅助窗口、各种弹窗），按「最后一个」必翻车。"""
+    runner = FakeRunner()
+    runner.windows = {
+        "1": ("QQ", 1, 1),
+        "2": ("qq", 16, 16),
+        "3": ("QQ", 720, 640),
+        "4": ("QQ", 960, 640),
+        "5": ("qq", 200, 200),
+    }
+    engine = X11Engine(runner=runner, display=":99")
+    assert engine.find_window() == "4"
+
+
+def test_find_window_ignores_search_popup_size(monkeypatch):
+    """搜索弹窗（综合搜索）不该被当成主窗口——它比主窗口小，面积排序已经排除。"""
+    runner = FakeRunner()
+    runner.windows = {"10": ("QQ", 960, 640), "11": ("综合搜索", 680, 680)}
+    engine = X11Engine(runner=runner, display=":99")
+    assert engine.find_window() == "10"
+
+
+def test_search_popup_clicked_at_its_own_coords():
+    """搜索结果在独立弹窗里：点「第一条结果」必须相对弹窗坐标，不能套主窗口。"""
+    runner = FakeRunner()
+    runner.windows = {"100": ("QQ", 960, 640), "200": ("综合搜索", 680, 680)}
+    engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
+    r = asyncio.run(engine.send(_req()))
     assert r.ok
+    clicks = [c for c in runner.calls if c[1] == "click"]
+    # click 参数形如 [xdotool, click, --window, <id>, x, y]
+    targets = [c[3] for c in clicks]
+    assert "200" in targets, "第一条结果应该点在搜索弹窗上"
 
 
 def test_empty_text_rejected_before_any_call():
