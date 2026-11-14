@@ -1351,7 +1351,7 @@ def _env(args: argparse.Namespace) -> int:
                 for path, pkg in pkgs:
                     print(f"[env] 下载 QQ 安装包：{pkg.url[:72]}…")
                     try:
-                        download_iso(pkg, path, attempts=4)
+                        download_iso(pkg, path, attempts=4, direct=True)
                         chosen = path
                         break
                     except RuntimeError as exc:

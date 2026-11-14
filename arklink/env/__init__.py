@@ -152,15 +152,25 @@ def sha256_of(path: str, *, chunk: int = 1 << 20) -> str:
 
 
 def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
-                 attempts: int = 12) -> str:
+                 attempts: int = 12, direct: bool = False) -> str:
     """下载并校验。校验和来自官方 SHA256SUMS，不是我们自己算的。
 
     2.6~3.9GB 的下载在这个网络环境里**必然**会断（真机第一次就到 6% 超时）。
     所以这里做两件之前没做的事：
     * 断点续传：`.part` 留着，下次带 `Range` 接着下，而不是从 0 重来；
     * 失败自动重试：断线/超时算正常事件，退避后继续，只有连续失败才报错。
+
+    direct=True 时**绕过系统代理直连**：本地代理对长连接不稳（TLS 中途被
+    污染，SHA 校验怎么都过不了），而 qqdl.gtimg.cn / ghproxy.net 这些
+    国内可达的源直连反而更稳。QQ 包下载就是直连的。
     """
-    open_fn = opener or urllib.request.urlopen
+    if opener:
+        open_fn = opener
+    elif direct:
+        open_fn = urllib.request.build_opener(
+            urllib.request.ProxyHandler({})).open
+    else:
+        open_fn = urllib.request.urlopen
     os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
 
     if os.path.isfile(dest) and iso.sha256 and sha256_of(dest) == iso.sha256:
