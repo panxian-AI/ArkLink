@@ -29,6 +29,7 @@ import logging
 import struct
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -243,6 +244,17 @@ class _Win32:
             return
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
+        # 声明 DPI aware：高缩放屏幕（笔记本常见 125%/150%）上， unaware 进程的
+        # GetWindowRect 与 SetCursorPos 各活在一套坐标里，点击会静默落到别的
+        # 位置——实测会点中会话列表第一条而不是搜索框。声明之后所有坐标都是
+        # 物理像素，所见即所得。必须赶在任何窗口/图形调用之前。
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+        except (AttributeError, OSError):
+            try:  # 老 Windows 没有 shcore
+                self.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass
         # 64 位必须显式声明返回指针的 API：ctypes 默认按 32 位 int 截断，
         # GlobalLock 拿到的高位会被砍掉，memmove 直接写 0 地址。
         u, k = self.user32, self.kernel32
@@ -454,6 +466,16 @@ class _Win32:
 _W32 = _Win32()
 
 
+def _area_of(hwnd: int) -> int:
+    """窗口面积（像素²）。用来在多个候选窗口里挑真正的主窗口。
+
+    不能按枚举顺序取第一个：同一进程会同时挂出主窗口和几个 158x26 的小窗口
+    （最小化残留 / 托盘浮窗），它们常在屏幕外，点上去等于什么都没做。
+    """
+    left, top, right, bottom = _W32.rect(hwnd)
+    return max(0, right - left) * max(0, bottom - top)
+
+
 # ---------------------------------------------------------------- 客户端门面
 
 
@@ -525,11 +547,11 @@ class ClientHost:
         pids = _W32.pids_of(self.process_names)
         if not pids:
             return ClientInfo()
-        windows: list[tuple[int, int, str]] = []
+        windows: list[tuple[int, int, str, int]] = []
         for pid in pids:
             for hwnd, cls, title in _W32.windows_of_pid(pid):
                 if cls in WINDOW_CLASSES or "QQ" in title:
-                    windows.append((pid, hwnd, title))
+                    windows.append((pid, hwnd, title, _area_of(hwnd)))
         if not windows:
             return ClientInfo(running=True, pid=pids[0])
 
@@ -543,13 +565,20 @@ class ClientHost:
                 uin=self.uin_of_pid(pid),
             )
 
+        # 同一个号可能同时有主窗口和几个「可见但没用」的小窗口（最小化残留、
+        # 托盘浮窗）。它们坐标常在屏幕外（实测见过 -21333,-21333 的 158x26），
+        # 而枚举顺序不保证主窗口在前——按坐标点下去会落到屏幕外，什么都不会发生，
+        # 也不报错。所以一律按面积倒序，让主窗口永远排第一。
+        windows.sort(key=lambda item: item[3], reverse=True)
+
         # 多开时窗口标题都叫 "QQ"，必须按账号挑，否则会拿另一个号发出去
         if self.uin and len(windows) > 1:
-            for pid, hwnd, title in windows:
+            for pid, hwnd, title, _area in windows:
                 if self.uin_of_pid(pid) == self.uin:
                     return build(pid, hwnd, title)
             self.last_action = f"没有找到账号 {self.uin} 的窗口（多开？）"
-        return build(*windows[0])
+        pid, hwnd, title, _area = windows[0]
+        return build(pid, hwnd, title)
 
     # ---- 操作 ----
     def focus(self, info: ClientInfo | None = None) -> bool:
@@ -562,7 +591,11 @@ class ClientHost:
         return ok
 
     def send_text(self, text: str, *, hwnd: int = 0) -> bool:
-        """往当前打开的会话发文本：先点输入框，再粘贴、回车。"""
+        """往当前打开的会话发文本：WM_CHAR 输入 + UIA 点「发送」按钮。
+
+        真机结论（2026-11-14）：SendInput 点击/回车全被客户端过滤，
+        唯一可靠路径是 UIA 定位 + PostMessage（详见 uia.py 模块注释）。
+        """
         if not text:
             return False
         if self.dry_run:
@@ -570,24 +603,16 @@ class ClientHost:
             logger.info(self.last_action)
             return True
         hwnd = hwnd or self.detect().hwnd
-        left, top, right, bottom = _W32.rect(hwnd)
-        if not right:
-            self.last_action = "send_text: 拿不到窗口位置"
+        if not hwnd:
+            self.last_action = "send_text: 没有主窗口"
             return False
-        # 输入框在聊天区底部（9.9.31 默认布局测得：约 65% 宽、87% 高）
-        _W32.click(
-            left + int((right - left) * self.input_xy[0]),
-            top + int((bottom - top) * self.input_xy[1]),
-        )
-        mods, vk = parse_hotkey(self.paste_hotkey)
-        if not _W32.set_clipboard(text):
-            self.last_action = "send_text: 剪贴板写入失败"
+        try:
+            ok = self._channel(hwnd).send_current_text(text)
+        except Exception as exc:
+            self.last_action = f"send_text: {exc}"
             return False
-        _W32.chord([*mods, vk])
-        time.sleep(0.15)
-        self._press_send()
-        self.last_action = f"send_text: {len(text)} 字"
-        return True
+        self.last_action = f"send_text: {len(text)} 字 {'ok' if ok else 'fail'}"
+        return ok
 
     def open_and_send(self, peer: str, text: str) -> bool:
         """点会话搜索框 → 点联系人 → 点输入框 → 粘贴 → 回车。
@@ -600,11 +625,17 @@ class ClientHost:
             self.last_action = f"[dry-run] open_and_send peer={peer} text={text[:40]!r}"
             logger.info(self.last_action)
             return True
-        hwnd = self._open_peer(peer, tag="open_and_send")
+        hwnd = self._target_hwnd("open_and_send")
         if not hwnd:
             return False
-        # 3) 输入框 → 粘贴 → 回车
-        return self.send_text(text, hwnd=hwnd)
+        # UIA：打开会话 → WM_CHAR 输入 → 点「发送」
+        try:
+            ok = self._channel(hwnd).send_text(str(peer), text)
+        except Exception as exc:
+            self.last_action = f"open_and_send: {exc}"
+            return False
+        self.last_action = f"open_and_send: peer={peer} {'ok' if ok else 'fail'}"
+        return ok
 
     def open_and_send_files(
         self,
@@ -625,94 +656,90 @@ class ClientHost:
         if not files:
             self.last_action = "open_and_send_files: 没有附件"
             return False
-        hwnd = self._open_peer(peer, tag="open_and_send_files")
+        hwnd = self._target_hwnd("open_and_send_files")
         if not hwnd:
             return False
-        return self.send_files(files, text=text, hwnd=hwnd)
+        try:
+            ok = self._channel(hwnd).send_files(str(peer), files, text=text)
+        except Exception as exc:
+            self.last_action = f"open_and_send_files: {exc}"
+            return False
+        self.last_action = (
+            f"open_and_send_files: peer={peer} files={len(files)} "
+            f"{'ok' if ok else 'fail'}"
+        )
+        return ok
 
     def send_files(self, paths: Iterable[str], *, text: str = "", hwnd: int = 0) -> bool:
-        """往当前打开的会话发本地附件。
+        """往当前打开的会话发本地附件（文件对话框路径）。
 
-        QQ 输入框对 `CF_HDROP` 的处理和资源管理器一致：图片直接变成待发送的
-        图片（先本地预览、后台上传），其它文件变成待上传的附件。所以这里不需要
-        任何进程内注入，只要把文件放进剪贴板再按一次粘贴键——和 `send_text`
-        走的是同一条路，区别只在剪贴板里放的格式。
-
-        顺序不能反：剪贴板一次只装得下一样东西，所以先粘文字、再粘文件。
-        粘完要等 `attach_delay`，让客户端把附件挂到输入框；按早了只把文字
-        发出去，附件被静默丢掉（客户端不报错，也就没有任何信号能提示你）。
+        剪贴板族方案（CF_HDROP + 粘贴）在真机上被客户端全部过滤：
+        WM_PASTE / SendInput Ctrl+V / WM_CHAR 0x16 / WM_DROPFILES 均无效。
+        可靠路径是 UIA 点「文件」按钮 → 原生对话框 WM_SETTEXT + Enter →
+        确认框「发送(N)」PostMessage 点击（详见 uia.py）。
         """
         files = [str(p) for p in paths if str(p)]
         if not files:
+            self.last_action = "send_files: 没有附件"
             return False
         if self.dry_run:
             self.last_action = f"[dry-run] send_files {len(files)} 个: {files[:3]}"
             logger.info(self.last_action)
             return True
         hwnd = hwnd or self.detect().hwnd
-        left, top, right, bottom = _W32.rect(hwnd)
-        if not right:
-            self.last_action = "send_files: 拿不到窗口位置"
+        if not hwnd:
+            self.last_action = "send_files: 没有主窗口"
             return False
-        _W32.click(
-            left + int((right - left) * self.input_xy[0]),
-            top + int((bottom - top) * self.input_xy[1]),
-        )
-        mods, vk = parse_hotkey(self.paste_hotkey)
-        if text:
-            if not _W32.set_clipboard(text):
-                self.last_action = "send_files: 剪贴板写入失败（文本）"
-                return False
-            _W32.chord([*mods, vk])
-            time.sleep(0.15)
-        if not _W32.set_clipboard_files(files):
-            self.last_action = "send_files: 剪贴板写入失败（文件）"
+        try:
+            ok = self._channel(hwnd).send_current_files(files, text=text)
+        except Exception as exc:
+            self.last_action = f"send_files: {exc}"
             return False
-        _W32.chord([*mods, vk])
-        time.sleep(self.attach_delay)
-        self._press_send()
         self.last_action = (
             f"send_files: {len(files)} 个附件" + (f" + {len(text)} 字" if text else "")
+            + (" ok" if ok else " fail")
         )
-        return True
+        return ok
 
     # ---- 内部 ----
-    def _open_peer(self, peer: str, *, tag: str) -> int:
-        """点搜索框 → 敲会话名 → 点第一条。成功返回窗口句柄，失败返回 0。"""
+    def _channel(self, hwnd: int) -> Any:
+        """UIA 通道。窗口句柄来自 detect()（按账号认窗口），不会碰别的账号。"""
+        from .uia import UiChannel
+
+        return UiChannel(hwnd)
+
+    def _target_hwnd(self, tag: str) -> int:
         info = self.detect()
         if not info.running or not info.hwnd:
             self.last_action = f"{tag}: 客户端不在线或没有窗口"
             return 0
-        if not _W32.focus(info.hwnd):
-            self.last_action = f"{tag}: 没能拿到前台焦点（放弃，不往未知窗口里打字）"
-            return 0
-        left, top, right, bottom = _W32.rect(info.hwnd)
-        if not right:
-            self.last_action = f"{tag}: 拿不到窗口位置"
-            return 0
-        # 1) 会话列表顶部的搜索框
-        _W32.click(left + 150, top + 65)
-        self._type(str(peer))
-        time.sleep(self.open_delay)
-        # 2) 搜索结果第一条（联系人区，固定出现在搜索框正下方）
-        _W32.click(left + 210, top + 156)
-        time.sleep(self.open_delay + 0.4)  # 等会话加载
         return info.hwnd
 
+    def read_messages(self) -> list[Any]:
+        """读**当前打开**聊天窗口里可见的消息（UIA 轮询接收用）。"""
+        hwnd = self._target_hwnd("read_messages")
+        if not hwnd:
+            return []
+        try:
+            with self._channel(hwnd) as ch:
+                return ch.read_messages()
+        except Exception as exc:
+            logger.warning("read_messages 失败: %s", exc)
+            return []
 
-    def _type(self, text: str) -> None:
-        if not _W32.set_clipboard(text):
-            return
-        mods, vk = parse_hotkey(self.paste_hotkey)
-        _W32.chord([*mods, vk])
-        time.sleep(0.1)
-
-    def _press_send(self) -> None:
-        if self.send_key.lower() == "enter":
-            _W32.chord([VK_RETURN])
-        else:
-            mods, vk = parse_hotkey(self.send_key)
-            _W32.chord([*mods, vk])
+    def read_peer_messages(self, peer: str) -> list[Any]:
+        """打开 peer 的聊天并读取可见消息（轮询接收用；会切换当前会话）。"""
+        hwnd = self._target_hwnd("read_peer_messages")
+        if not hwnd:
+            return []
+        try:
+            with self._channel(hwnd) as ch:
+                if not ch.win.open_chat(str(peer)):
+                    return []
+                return ch.win.read_messages()
+        except Exception as exc:
+            logger.warning("read_peer_messages(%s) 失败: %s", peer, exc)
+            return []
 
 
 # ---------------------------------------------------------------- 适配器
@@ -745,18 +772,23 @@ def plain_text_of(message: Any) -> str:
 
 
 class ClientHostAdapter(LinkAdapter):
-    """把「操作官方客户端」挂成一个通道（只发文本，不收消息）。
+    """把「操作官方客户端」挂成一个通道（发送 + 可选的 UIA 轮询接收）。
 
     bot.toml：
         [[adapters]]
         type = "ntqq-client"
-        dry_run = false              # 校准好热键后再关掉
-        search_hotkey = "^f"
+        dry_run = false              # 校准好链路后再关掉
         process_names = ["QQ.exe"]
+        receive_peers = ["阿潘"]     # 要轮询的会话名（备注/昵称）；空 = 不收
+
+    接收说明：UIA 轮询读的是**聊天窗口里可见的气泡**（详见 uia.py），
+    依赖界面语言；只会切换到 receive_peers 列出的会话，轮询期间 QQ 窗口
+    会跟着切来切去。收不到历史消息，也不适合高频场景——要真·实时推送，
+    后续从 ntqq 协议栈（sso/push，纯标准库）接事件，本通道作为兜底。
     """
 
     name = "ntqq-client"
-    #: 明确声明：本通道收不到事件，框架不要指望它做回复路由
+    #: 类级默认：不收。配置了 receive_peers 时实例上会覆盖为 True
     supports_receive = False
 
     def __init__(
@@ -767,6 +799,7 @@ class ClientHostAdapter(LinkAdapter):
         paste_hotkey: str = "^v",
         process_names: Iterable[str] | None = None,
         poll_interval: float = 5.0,
+        receive_peers: Iterable[str] = (),
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -778,6 +811,12 @@ class ClientHostAdapter(LinkAdapter):
         )
         self.poll_interval = poll_interval
         self.info: ClientInfo = ClientInfo()
+        #: 轮询接收的会话列表；指纹去重窗口 + 合成 message_id
+        self.receive_peers = tuple(str(p) for p in (receive_peers or ()) if str(p))
+        if self.receive_peers:
+            self.supports_receive = True
+        self._seen: dict[str, deque[str]] = {}
+        self._msg_seq = 0
 
     # 覆盖：本通道"健康"= 客户端在线
     @property
@@ -794,7 +833,42 @@ class ClientHostAdapter(LinkAdapter):
                     self._connected.clear()
             except Exception:
                 logger.exception("检测 QQ 客户端失败")
+            if self.info.running and self.receive_peers:
+                try:
+                    await self._poll_receive()
+                except Exception:
+                    logger.exception("UIA 轮询接收失败")
             await asyncio.sleep(self.poll_interval)
+
+    async def _poll_receive(self) -> None:
+        """每个会话轮流：打开聊天 → 读可见气泡 → 指纹去重 → emit。"""
+        for peer in self.receive_peers:
+            msgs = await asyncio.to_thread(self.host.read_peer_messages, peer)
+            seen = self._seen.setdefault(peer, deque(maxlen=300))
+            for m in msgs:
+                if m.outgoing:
+                    continue          # 自己发的（含本通道发出的）不当事件
+                fp = m.fingerprint
+                if not fp.strip("|") or fp in seen:
+                    continue
+                seen.append(fp)
+                self._msg_seq += 1
+                self._msg_seq &= 0x7FFFFFFF
+                await self._emit_dict({
+                    "time": int(time.time()),
+                    "self_id": self.host.uin or 0,
+                    "post_type": "message",
+                    "message_type": "private",
+                    "sub_type": "friend",
+                    "message_id": self._msg_seq,
+                    "user_id": 0,             # UIA 拿不到对方 QQ 号
+                    "message": [{"type": "text", "data": {"text": m.text}}],
+                    "raw_message": m.text,
+                    "sender": {"user_id": 0, "nickname": m.sender or peer},
+                    "via": "ui-poll",
+                    "peer_name": peer,
+                    "msg_time": m.time,
+                })
 
     async def disconnect(self) -> None:
         self._connected.clear()

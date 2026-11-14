@@ -196,26 +196,48 @@ def test_dry_run_send_files():
 
 
 def test_send_files_pastes_text_before_files(monkeypatch):
-    """剪贴板一次只装得下一样，所以顺序必须是先文本后文件。"""
+    """UIA 通道发文件：先打文字再点「文件」按钮（顺序由 UiChannel 保证）。"""
     client = H.ClientHost(dry_run=False, attach_delay=0)
     calls: list[tuple] = []
-    monkeypatch.setattr(H._W32, "rect", lambda hwnd: (0, 0, 1000, 800))
-    monkeypatch.setattr(H._W32, "click", lambda x, y: calls.append(("click", x, y)))
-    monkeypatch.setattr(H._W32, "chord", lambda keys: calls.append(("chord", tuple(keys))))
-    monkeypatch.setattr(H._W32, "set_clipboard", lambda t: calls.append(("text", t)) or True)
-    monkeypatch.setattr(
-        H._W32, "set_clipboard_files", lambda p: calls.append(("files", list(p))) or True
-    )
+
+    class FakeChannel:
+        def __init__(self, hwnd):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def send_current_files(self, paths, text=""):
+            calls.append(("text", text))
+            calls.append(("files", list(paths)))
+            return True
+
+    monkeypatch.setattr(client, "_channel", lambda hwnd: FakeChannel(hwnd))
     assert client.send_files(["C:/a.png"], text="看图", hwnd=1) is True
     kinds = [c[0] for c in calls]
     assert kinds.index("text") < kinds.index("files")
-    assert calls[-1] == ("chord", (H.VK_RETURN,))
 
 
-def test_send_files_reports_clipboard_failure(monkeypatch):
+def test_send_files_reports_failure(monkeypatch):
+    """UIA 通道发文件失败时，失败原因要落到 last_action。"""
     client = H.ClientHost(dry_run=False, attach_delay=0)
-    monkeypatch.setattr(H._W32, "rect", lambda hwnd: (0, 0, 1000, 800))
-    monkeypatch.setattr(H._W32, "click", lambda x, y: None)
-    monkeypatch.setattr(H._W32, "set_clipboard_files", lambda p: False)
+
+    class FakeChannel:
+        def __init__(self, hwnd):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def send_current_files(self, paths, text=""):
+            return False
+
+    monkeypatch.setattr(client, "_channel", lambda hwnd: FakeChannel(hwnd))
     assert client.send_files(["C:/a.png"], hwnd=1) is False
-    assert "剪贴板写入失败" in client.last_action
+    assert "fail" in client.last_action
