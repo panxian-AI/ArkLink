@@ -139,9 +139,10 @@ heal() {
   # 3) QQ：进程死了才重启（容器里 Chromium 沙箱起不来，必须 --no-sandbox）
   if ! qq_alive; then
     QQ_BIN=\$(command -v qq || echo /opt/QQ/qq)
-    LOG=/tmp/qq.log
-    # 上一个 root 会话留下的日志属主不对时换个名字，别让重定向把它拦死
-    [ -e "\$LOG" ] && [ ! -w "\$LOG" ] && LOG=/tmp/qq-\$(id -u).log
+    # 日志绝对不能放 /tmp：sticky 目录有 fs.protected_regular 保护，
+    # 属主不同的文件连 root 都写不进去（Permission denied，真机踩过）
+    LOG=/var/log/qq.log
+    [ -w "\$LOG" ] || LOG=/var/log/qq-\$(id -u).log
     if [ -x "\$QQ_BIN" ]; then
       if [ "\$(id -u)" = "0" ] && id "\$QQ_USER" >/dev/null 2>&1; then
         runuser -u "\$QQ_USER" -- setsid "\$QQ_BIN" --no-sandbox >"\$LOG" 2>&1 &

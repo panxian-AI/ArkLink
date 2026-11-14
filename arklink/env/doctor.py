@@ -88,7 +88,7 @@ def collect_report(mgr: "EnvManager", *, password: str) -> dict[str, Any]:
         "echo QQ_WIN=$(xdotool search --name '^QQ$' 2>/dev/null | wc -l); "
         "echo CRASHES=$(ls $HOME/.config/QQ/crash_files 2>/dev/null | wc -l); "
         "echo LOGIN_BAK=$([ -f $HOME/qq-login.tgz ] && echo yes || echo no); "
-        "echo QQLOG=$(tail -c 400 /tmp/qq.log 2>/dev/null | tr '\\n' ' ' | tail -c 200)"
+        "echo QQLOG=$( (tail -c 400 /var/log/qq.log 2>/dev/null || tail -c 400 /tmp/qq.log 2>/dev/null) | tr '\\n' ' ' | tail -c 200)"
     )
     try:
         cmds = guest_run_commands_safe(mgr, name, probe, user, password)
@@ -195,8 +195,8 @@ def run_checks(report: dict[str, Any]) -> list[Finding]:
     qqlog = str(guest.get("QQLOG") or "")
     if "Permission denied" in qqlog:
         findings.append(Finding("qq_log_perm", False, "QQ 启动日志写不进去（Permission denied）",
-                                "start.sh 以 root 跑 QQ，而 /tmp/qq.log 属主是别的用户——"
-                                "QQ 会被重定向拦住直接不起来；新版 start.sh 用登录用户跑 QQ 并自动换日志名",
+                                "日志文件放在 /tmp 且属主是别的用户：sticky 目录有 fs.protected_regular 保护，"
+                                "连 root 写进去都会被拒，QQ 直接被重定向拦住不起。新版 start.sh 已改到 /var/log/qq.log",
                                 ["sudo systemctl restart arklink.service"]))
 
     if guest.get("LOGIN_BAK") != "yes":
