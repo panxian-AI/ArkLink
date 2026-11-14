@@ -18,6 +18,7 @@ import binascii
 import json
 import os
 import sys
+import time
 from typing import Any
 
 
@@ -1337,17 +1338,27 @@ def _env(args: argparse.Namespace) -> int:
         if chosen:
             print(f"[env] QQ 安装包已有现成的：{chosen}")
         else:
-            for path, pkg in pkgs:
-                print(f"[env] 下载 QQ 安装包：{pkg.url[:72]}…")
-                try:
-                    download_iso(pkg, path, attempts=4)
-                    chosen = path
-                    break
-                except RuntimeError as exc:
-                    print(f"[env] ⚠️ 这个源失败：{exc}；试下一个源…")
+            # GitHub/加速站这条链路极不稳定：单轮全灭是常态。给 30 分钟预算
+            # 循环重试（.part 会续传），一条命令自己熬到成功——这就是
+            # 「傻瓜式：中途不会遇到问题」的含义。
+            deadline = time.time() + 1800
+            round_no = 0
+            while time.time() < deadline and not chosen:
+                round_no += 1
+                if round_no > 1:
+                    print(f"[env] QQ 包还没下到，60s 后开始第 {round_no} 轮重试…")
+                    time.sleep(60)
+                for path, pkg in pkgs:
+                    print(f"[env] 下载 QQ 安装包：{pkg.url[:72]}…")
+                    try:
+                        download_iso(pkg, path, attempts=4)
+                        chosen = path
+                        break
+                    except RuntimeError as exc:
+                        print(f"[env] ⚠️ 这个源失败：{str(exc)[:120]}；试下一个源…")
             if not chosen:
-                print("[env] ⚠️ 所有源都没下到 QQ 包：会继续让 guest 自己下载"
-                      "（网络差可能装不上 QQ，setup 结尾会明确报失败）")
+                print("[env] ⚠️ 30 分钟内所有源都没下到 QQ 包：会继续让 guest 自己"
+                      "下载（网络差可能装不上 QQ，setup 结尾会明确报失败）")
         if chosen:
             extra.append(chosen)
 
