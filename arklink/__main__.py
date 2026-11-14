@@ -1121,8 +1121,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_env = sub.add_parser("env", help="内置虚拟环境：建/启/停/推代码/删（跑 QQ 用）")
     p_env.add_argument("action",
-                       choices=["plan", "create", "up", "down", "status", "eject", "push", "destroy", "token"],
-                       help="plan=算账 create=建并装 up/down=启停 eject=摘ISO push=推仓库 destroy=删")
+                       choices=["plan", "create", "up", "down", "status", "eject", "push",
+                                "destroy", "token", "doctor"],
+                       help="plan=算账 create=建并装 up/down=启停 eject=摘ISO push=推仓库 "
+                            "destroy=删 doctor=体检排障（可接 DeepSeek AI）")
     p_env.add_argument("--name", default="arklink", help="虚拟机名（默认 arklink）")
     p_env.add_argument("--iso", default="", help="Ubuntu Server ISO 路径（不给就先在常见目录找）")
     p_env.add_argument("--iso-url", default="", help="自定义 ISO 下载地址（默认用官方 24.04 SHA256SUMS 解析）")
@@ -1130,6 +1132,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_env.add_argument("--user", default="arklink", help="guest 用户名（默认 arklink）")
     p_env.add_argument("--password", default="", help="guest 密码；不给则自动生成并记在 env.json")
     p_env.add_argument("--source", default="", help="push 时推哪个目录（默认当前目录）")
+    p_env.add_argument("--key", default="", help="doctor：DeepSeek API key（传一次就记住）")
+    p_env.add_argument("--ai", action="store_true", help="doctor：把体检报告交给 DeepSeek 深入分析")
+    p_env.add_argument("--apply", action="store_true", help="doctor：把修复命令真的执行掉（默认只打印）")
     p_env.add_argument("--json", action="store_true", help="输出 JSON")
     p_env.add_argument("--dry-run", action="store_true", help="只打印将执行的命令，不动手")
     p_env.add_argument("--force", action="store_true", help="create 时覆盖同名 VM / down 时强制断电")
@@ -1277,6 +1282,78 @@ def _env(args: argparse.Namespace) -> int:
             print("\n上层怎么用：")
             print(f'  arklink bot run 你的脚本.py --api http://127.0.0.1:{plan.api_port} --token {token}')
             print("  或写进 ~/.arklink/api.json 后直接 arklink bot check")
+        return 0
+
+    if args.action == "doctor":
+        from .env.doctor import (
+            collect_report,
+            deepseek_diagnose,
+            load_ai_key,
+            run_checks,
+            run_fixes,
+            set_ai_key,
+        )
+
+        password = args.password or mgr.state.extra.get("password") or ""
+        if args.key:
+            path = set_ai_key(args.key)
+            print(f"[doctor] AI key 已存到 {path}（0600），下次不用再传")
+        if not password and not args.dry_run:
+            return fail("需要 guest 密码：arklink env doctor --password <密码>")
+
+        print("[doctor] 收集体检报告（宿主 + 虚拟机两侧）…")
+        try:
+            report = collect_report(mgr, password=password)
+            findings = run_checks(report)
+        except (VBoxError, RuntimeError) as exc:
+            return fail(str(exc))
+
+        problems = [f for f in findings if not f.ok]
+        if args.json:
+            _print({"report": report,
+                    "findings": [f.__dict__ for f in findings]})
+            return 0
+        print(f"虚拟机 {report.get('vm', {}).get('name', '?')}："
+              f"{report.get('vm', {}).get('state', '?')}")
+        for f in findings:
+            mark = "✓" if f.ok else "✗"
+            print(f"  {mark} {f.check}: {f.detail}")
+            if not f.ok:
+                print(f"      原因：{f.cause}")
+                for cmd in f.fix:
+                    where = "guest" if f.ctx == "guest" else "host"
+                    print(f"      修复({where})：{cmd}")
+        if not problems:
+            print("[doctor] 规则层没发现问题。")
+
+        if not args.ai:
+            if problems:
+                print("[doctor] 想让 AI 深入分析：arklink env doctor --ai "
+                      "（首次加 --key sk-xxxx 传入 DeepSeek key）")
+            return 0
+
+        key = load_ai_key()
+        if not key:
+            return fail("没有 AI key：加 --key sk-xxxx（DeepSeek），传一次就记住；"
+                        "或设环境变量 DEEPSEEK_API_KEY")
+        print("[doctor] 交给 DeepSeek 分析…")
+        try:
+            advice = deepseek_diagnose(report, findings, key)
+        except RuntimeError as exc:
+            return fail(f"AI 分析失败：{exc}")
+        print(f"AI 结论：{advice.get('diagnosis', '')}")
+        steps = advice.get("steps") or []
+        for i, step in enumerate(steps, 1):
+            ctx = step.get("ctx", "guest")
+            print(f"  {i}. [{ctx}] {step.get('desc', '')}")
+            print(f"     $ {step.get('cmd', '')}")
+        if args.apply and steps:
+            print("[doctor] 开始执行修复（--apply）…")
+            outputs = run_fixes(mgr, steps, password=password)
+            for out in outputs:
+                print(out)
+        elif steps:
+            print("[doctor] 确认没问题后加 --apply 真的执行。")
         return 0
 
     if args.action == "push":

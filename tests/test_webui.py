@@ -170,3 +170,45 @@ def test_logs_and_auth_endpoints(ui):
     assert isinstance(data["items"], list)
     _status, auth = _get(url, "/api/auth")
     assert auth["token"] is True
+
+
+# ---------------------------------------------------------------- 虚拟屏幕页
+# 首次部署要扫码登录：这一步没法自动化，但必须能「自己看」——WebUI 里有虚拟屏幕页，
+# 不依赖任何人把截图发给你。
+
+
+def test_screen_page_served(ui):
+    _server, url, _svc = ui
+    req = urllib.request.Request(url.rstrip("/") + "/screen")
+    req.add_header("Authorization", "Bearer t")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read().decode()
+    assert resp.status == 200
+    assert "虚拟屏幕" in body and "/screen.png" in body
+
+
+def test_screen_png_route_returns_image(ui, monkeypatch):
+    server, url, _svc = ui
+    monkeypatch.setattr(server, "screen_png", lambda: b"\x89PNG\r\n\x1a\nfake")
+    req = urllib.request.Request(url.rstrip("/") + "/screen.png")
+    req.add_header("Authorization", "Bearer t")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = resp.read()
+    assert resp.status == 200 and data.startswith(b"\x89PNG")
+
+
+def test_screen_png_without_scrot_is_503(ui, monkeypatch):
+    server, url, _svc = ui
+    monkeypatch.setattr(server, "screen_png", lambda: None)
+    req = urllib.request.Request(url.rstrip("/") + "/screen.png")
+    req.add_header("Authorization", "Bearer t")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=10)
+    assert exc.value.code == 503
+
+
+def test_home_page_links_to_screen(ui):
+    _server, url, _svc = ui
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        body = resp.read().decode()
+    assert 'href="/screen"' in body

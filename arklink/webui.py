@@ -393,6 +393,22 @@ class WebUI:
                         HTTPStatus.UNAUTHORIZED,
                         {"ok": False, "msg": "需要登录", "password": bool(ui.password)},
                     )
+                if path == "/screen":
+                    return self._send_html(HTTPStatus.OK, _SCREEN_PAGE.replace("{{TITLE}}", ui.title))
+                if path == "/screen.png":
+                    data = ui.screen_png()
+                    if data is None:
+                        return self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"ok": False, "msg": "拿不到虚拟屏幕（scrot/Xvfb 不可用）"},
+                        )
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if path == "/api/status":
                     return self._send_json(HTTPStatus.OK, ui.status())
                 if path == "/api/history":
@@ -441,6 +457,49 @@ class WebUI:
                 return self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "msg": "not found"})
 
         return Handler
+
+    # ------------------------------------------------------------ 虚拟屏幕
+    def screen_png(self) -> bytes | None:
+        """截一张虚拟屏幕（Xvfb 里的 QQ 界面），给 WebUI 直接看。
+
+        首次部署要扫码登录，这一步没法自动化——但**不该**要求用户去开 VNC 或者
+        找开发者要截图。WebUI 里看一眼就行：登录界面、聊天窗口、报错弹窗
+        都在这一张图里。1.5s 内重复请求走缓存，避免狂点把 CPU 吃满。
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if not shutil.which("scrot"):
+            return None
+        display = os.environ.get("DISPLAY", ":99")
+        now = time.time()
+        cached = getattr(self, "_screen_cache", None)
+        if cached and now - cached[0] < 1.5:
+            return cached[1]
+        fd, path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            proc = subprocess.run(
+                ["scrot", "-o", "-q", "85", path],
+                capture_output=True, timeout=15,
+                env={**os.environ, "DISPLAY": display},
+            )
+            if proc.returncode != 0:
+                logger.debug("scrot 失败：%s", (proc.stderr or b"").decode("utf-8", "replace")[:200])
+                return None
+            with open(path, "rb") as fh:
+                data = fh.read()
+            self._screen_cache = (now, data)
+            return data
+        except (OSError, subprocess.SubprocessError):
+            return None
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------ 生命周期
     def build(self) -> ThreadingHTTPServer:
@@ -520,6 +579,7 @@ _PAGE = r"""<!doctype html>
   <span class="pill" id="ver">-</span>
   <span class="pill" id="engine">-</span>
   <span style="flex:1"></span>
+  <a href="/screen" target="_self" style="color:var(--accent);text-decoration:none;font-size:13px">虚拟屏幕（扫码登录/看界面）</a>
   <button class="ghost shrink" onclick="loadAll()">刷新</button>
 </header>
 <main>
@@ -707,5 +767,76 @@ async function doSend(){
   } finally { $("sendbtn").disabled = false; }
 }
 loadAll(); setInterval(loadAll, 5000);
+</script></body></html>
+"""
+
+
+# 虚拟屏幕页：首部署扫码登录 / 看运行中的 QQ 界面，都在这张图上
+_SCREEN_PAGE = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}} · 虚拟屏幕</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0b0f14;color:#e6edf3;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #1f2a37;background:#0e141b;position:sticky;top:0;z-index:2}
+h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+a{color:#58a6ff;text-decoration:none}
+.pill{font-size:12px;color:#8b949e;border:1px solid #263241;border-radius:999px;padding:3px 10px}
+.wrap{display:flex;gap:20px;padding:20px;align-items:flex-start;flex-wrap:wrap}
+.shot{flex:1 1 720px;min-width:320px;background:#000;border:1px solid #1f2a37;border-radius:10px;overflow:hidden}
+.shot img{display:block;width:100%;height:auto}
+.side{flex:0 0 300px;display:flex;flex-direction:column;gap:12px}
+.card{background:#0e141b;border:1px solid #1f2a37;border-radius:10px;padding:14px}
+.card h2{font-size:13px;margin:0 0 8px;color:#8b949e;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.card p{margin:6px 0;color:#c9d1d9}
+button{background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
+button:hover{background:#2f81f7}
+button.ghost{background:#161d26;border:1px solid #263241;color:#c9d1d9}
+label{display:flex;align-items:center;gap:8px;color:#c9d1d9;font-size:13px;margin-top:8px}
+code{background:#161d26;padding:2px 6px;border-radius:5px;font-size:12px;color:#a5d6ff}
+.err{color:#f85149}
+</style></head><body>
+<header>
+  <h1>{{TITLE}} · 虚拟屏幕</h1>
+  <span class="pill" id="ts">连接中…</span>
+  <span style="flex:1"></span>
+  <a href="/" target="_self">← 回控制台</a>
+</header>
+<div class="wrap">
+  <div class="shot"><img id="shot" src="/screen.png" alt="虚拟屏幕"></div>
+  <div class="side">
+    <div class="card">
+      <h2>这一步在干什么</h2>
+      <p>虚拟机里的 QQ 正在这块虚拟屏幕上运行。首次部署需要<b>扫码登录</b>——用手机 QQ 扫画面里的二维码即可，之后会自动登录。</p>
+      <p>登录界面、聊天窗口、任何报错弹窗都在这张图上，和真实屏幕一模一样。</p>
+    </div>
+    <div class="card">
+      <h2>刷新</h2>
+      <label><input type="checkbox" id="auto" checked> 自动刷新（每 2 秒）</label>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button onclick="load()">立即刷新</button>
+        <button class="ghost" onclick="openBig()">新窗口放大</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>出问题</h2>
+      <p>黑屏 / 看不到窗口：在主机上跑 <code>arklink env doctor --apply</code>，它会自检并修复（Xvfb 僵死、QQ 崩溃这类都能自愈）。</p>
+      <p>疑难杂症加 <code>--ai --key sk-…</code>，交给 DeepSeek 分析。</p>
+    </div>
+  </div>
+</div>
+<script>
+function load(){
+  const img = document.getElementById("shot");
+  const bust = "/screen.png?t=" + Date.now();
+  const probe = new Image();
+  probe.onload = () => { img.src = bust; document.getElementById("ts").textContent = "已刷新 " + new Date().toLocaleTimeString(); };
+  probe.onerror = () => { document.getElementById("ts").textContent = "截图失败（scrot/Xvfb 不可用）"; };
+  probe.src = bust;
+}
+function openBig(){ window.open("/screen.png","_blank"); }
+setInterval(() => { if (document.getElementById("auto").checked) load(); }, 2000);
+load();
 </script></body></html>
 """

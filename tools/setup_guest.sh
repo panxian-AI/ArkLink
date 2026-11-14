@@ -60,10 +60,28 @@ apt-get install -y --no-install-recommends \
 fc-list :lang=zh | grep -q . || die "中文字体缺失，坐标校准会失效：请检查 fonts-wqy-* 是否装上"
 
 # ---------------------------------------------------------------- 2. QQ
+# 官方 CDN 对部分网络环境回 403，官方直连失败时回退 GitHub 镜像（校验 SHA256）
+QQ_MIRROR_URL="${QQ_MIRROR_URL:-https://github.com/Rodert/qq-versions/releases/download/qq-packages-20260813-1d08f1d4/QQ_3.2.32_260812_amd64_01.deb}"
+QQ_MIRROR_SHA="${QQ_MIRROR_SHA:-4409ec87f96675318ab4c456735741ec05513f8197733623f55c729579023353}"
 if [ -z "$QQ_DEB" ]; then
   for cand in /tmp/QQ_*.deb /root/QQ_*.deb /opt/QQ_*.deb; do
     [ -f "$cand" ] && QQ_DEB="$cand" && break
   done
+fi
+if [ -z "$QQ_DEB" ] && ! command -v qq >/dev/null 2>&1 && [ ! -x /opt/QQ/qq ]; then
+  log "本地没有 QQ 安装包，尝试从 GitHub 镜像下载（约 177MB）…"
+  if wget -q --timeout=120 --tries=3 -O /tmp/QQ_download.deb "$QQ_MIRROR_URL" 2>/dev/null; then
+    if echo "$QQ_MIRROR_SHA  /tmp/QQ_download.deb" | sha256sum -c --status 2>/dev/null; then
+      QQ_DEB=/tmp/QQ_download.deb
+      log "镜像下载完成，SHA256 校验通过"
+    else
+      warn "镜像下载的包校验不符，删掉以防装错东西"
+      rm -f /tmp/QQ_download.deb
+    fi
+  else
+    warn "镜像下载失败（guest 可能访问不了 GitHub）"
+    rm -f /tmp/QQ_download.deb
+  fi
 fi
 if [ -n "$QQ_DEB" ] && [ -f "$QQ_DEB" ]; then
   log "安装 QQ：$QQ_DEB"
@@ -89,32 +107,50 @@ else
 fi
 
 # ---------------------------------------------------------------- 4. 启动编排
-log "写启动脚本 /opt/arklink/start.sh"
+log "写启动脚本 /opt/arklink/start.sh（自愈式：每 20s 体检一遍，坏了自动拉起）"
 mkdir -p /opt/arklink
 cat > /opt/arklink/start.sh <<EOF
 #!/usr/bin/env bash
-# 虚拟屏幕 + 窗口管理器 + QQ + Arklink WebUI
+# 虚拟屏幕 + 窗口管理器 + QQ + Arklink WebUI，自愈式监督
 set -u
 export DISPLAY=:${DISPLAY_NUM}
 export LANG=C.UTF-8
 
-# 已经跑着就别起第二份
-pgrep -f "Xvfb :${DISPLAY_NUM}" >/dev/null || {
-  Xvfb :${DISPLAY_NUM} -screen 0 ${GEOMETRY} -nolisten tcp &
-  sleep 1
-}
-# openbox 不能省：没有 WM，windowactivate 不会生效，窗口也没有正常尺寸
-pgrep -x openbox >/dev/null || { openbox >/dev/null 2>&1 & sleep 1; }
+# 只看"活不活着"，不看"进程在不在"——Xvfb 僵死（进程在但屏幕黑）是最常见的坑
+display_ok() { xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; }
 
-# QQ（容器里 Chromium 沙箱起不来，必须 --no-sandbox）
-if ! pgrep -f "/opt/QQ/qq|/opt/qq/qq" >/dev/null; then
-  QQ_BIN=\$(command -v qq || echo /opt/QQ/qq)
-  [ -x "\$QQ_BIN" ] && { "\$QQ_BIN" --no-sandbox >/tmp/qq.log 2>&1 & sleep 8; }
-fi
+heal() {
+  # 1) Xvfb：健康检查，坏了先杀干净再起新的（pgrep 命中不等于能用）
+  if ! display_ok; then
+    pkill -f "Xvfb :${DISPLAY_NUM}" 2>/dev/null; sleep 1
+    Xvfb :${DISPLAY_NUM} -screen 0 ${GEOMETRY} -nolisten tcp >/dev/null 2>&1 &
+    sleep 2
+  fi
+  # 2) openbox 不能省：没有 WM，windowactivate 不会生效，窗口也没有正常尺寸
+  pgrep -x openbox >/dev/null || { openbox >/dev/null 2>&1 & sleep 1; }
+  # 3) QQ：进程死了才重启（容器里 Chromium 沙箱起不来，必须 --no-sandbox）
+  if ! pgrep -f "/opt/QQ/qq|/opt/qq/qq" >/dev/null; then
+    QQ_BIN=\$(command -v qq || echo /opt/QQ/qq)
+    [ -x "\$QQ_BIN" ] && setsid "\$QQ_BIN" --no-sandbox >/tmp/qq.log 2>&1 &
+    sleep 8
+  fi
+}
+
+heal
 
 # Arklink 控制面：只监听本机，外面通过端口映射/隧道访问
-exec /opt/arklink-venv/bin/python -m arklink serve webui \\
-  --host 0.0.0.0 --port 6800 --engine x11
+/opt/arklink-venv/bin/python -m arklink serve webui \\
+  --host 0.0.0.0 --port 6800 --engine x11 &
+WEBUI=\$!
+
+# 监督循环：webui 活着就一直体检；webui 死了再 heal 一轮后退出，
+# 让 systemd Restart=always 接手整个栈
+while kill -0 \$WEBUI 2>/dev/null; do
+  sleep 20
+  heal
+done
+heal
+wait \$WEBUI
 EOF
 chmod +x /opt/arklink/start.sh
 
