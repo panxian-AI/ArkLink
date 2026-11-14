@@ -1219,7 +1219,8 @@ def _env(args: argparse.Namespace) -> int:
             return fail(str(exc))
         if args.dry_run:
             return 0
-        print("[env] 安装完成。下一步：")
+        print("[env] 虚拟机已无头启动，安装正在后台进行（约 10–20 分钟，"
+              "装完自动重启进系统）。等 `arklink env status` 显示在线后：")
         print(f"  arklink env push --password {password}   # 把仓库推进去并装 QQ/Xvfb/Arklink")
         print(f"  arklink env status                        # 看状态与磁盘占用")
         return 0

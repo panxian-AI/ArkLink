@@ -230,6 +230,8 @@ class EnvManager:
             additions_iso=self.box.guest_additions_iso() if self.box else "",
             post_install=post_install,
         )
+        # unattended install 只挂应答盘，不开机——启动后安装才真正开始
+        cmds += [[VBM, "startvm", plan.name, "--type", "headless"]]
         return cmds
 
     def create(
@@ -250,7 +252,8 @@ class EnvManager:
             iso, user=user, password=password, post_install=post_install
         )
         labels = ["建虚拟机", "配置硬件/网络", "建虚拟磁盘", "挂 SATA 控制器", "挂硬盘",
-                  "端口映射（只绑 127.0.0.1）", "无人值守安装（约 10–20 分钟）"]
+                  "端口映射（只绑 127.0.0.1）", "无人值守安装（挂应答盘）",
+                  "无头启动（安装真正开始，约 10–20 分钟）"]
         if not self.dry_run:
             os.makedirs(self.plan.workdir, exist_ok=True)
         for index, cmd in enumerate(cmds):

@@ -152,6 +152,16 @@ def test_unattended_commands_include_sudo_and_additions():
     assert "--hostname=arklink.local" in joined
 
 
+def test_create_sequence_ends_with_headless_start():
+    """unattended install 只挂应答盘不开机——最后一步必须无头启动。"""
+    mgr = EnvManager.open(
+        "arklink", report=make_report(), runner=FakeRunner(), dry_run=True
+    )
+    cmds = mgr.commands_for_create("/tmp/u.iso", user="arklink", password="pw")
+    last = " ".join(cmds[-1])
+    assert "startvm arklink" in last and "--type headless" in last
+
+
 def test_eject_detaches_dvd_and_boots_disk():
     cmds = eject_commands("arklink")
     assert any("--type dvddrive --medium none" in " ".join(c) for c in cmds)
