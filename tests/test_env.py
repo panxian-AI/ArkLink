@@ -148,6 +148,8 @@ def test_unattended_commands_include_sudo_and_additions():
     sudo = cmd[cmd.index("--post-install-command") + 1]
     assert "NOPASSWD:ALL" in sudo and "/etc/sudoers.d/arklink" in sudo
     assert "Asia/Shanghai" in joined
+    # VBox 7.2 要求 hostname 带域名（裸名会 E_INVALIDARG）
+    assert "--hostname=arklink.local" in joined
 
 
 def test_eject_detaches_dvd_and_boots_disk():

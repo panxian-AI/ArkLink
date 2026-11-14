@@ -89,7 +89,7 @@ def unattended_commands(
            f"--user={user}",
            f"--password={password}",
            f"--full-user-name={user}",
-           f"--hostname={plan.name}",
+           f"--hostname={plan.name}.local",
            f"--locale={locale}",
            f"--country={country}",
            f"--time-zone={timezone}"]
