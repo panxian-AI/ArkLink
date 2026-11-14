@@ -8,3 +8,6 @@ build/
 dist/
 *.log
 data/
+
+# 宣传物料（本地素材，不进仓库）
+docs/media/
