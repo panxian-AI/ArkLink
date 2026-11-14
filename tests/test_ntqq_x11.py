@@ -77,13 +77,17 @@ def test_send_sequence():
     verbs = runner.verbs()
     assert verbs[0] == "search"
     assert "windowactivate" in verbs
-    assert verbs.count("click") == 3          # 搜索框、第一条结果、输入框
-    assert verbs.count("type") == 2           # 收件人、正文
-    assert "key" in verbs
-    # 正文那一次 type 必须带 --clearmodifiers，且不碰剪贴板
-    types = [c for c in runner.calls if c[1] == "type"]
-    assert all("--clearmodifiers" in c for c in types)
-    assert "你好" in types[-1]
+    # 搜索框 + 输入框；选会话用回车，不再是第三次点击
+    assert verbs.count("click") == 2
+    key_calls = [" ".join(c) for c in runner.calls if c[1] == "key"]
+    # 选会话必须是回车：点坐标会点进"聊天记录"分组，会话不打开就会发错人
+    assert any("Return" in k for k in key_calls)
+    # 打字前必须先清空搜索框和输入框，否则两次搜索会拼在一起（"505阿"）
+    assert sum("ctrl+a" in k for k in key_calls) >= 2
+    assert sum("Delete" in k for k in key_calls) >= 2
+    # 正文要么走剪贴板粘贴，要么退回逐字 type，但内容必须落到输入框
+    flat = " ".join(" ".join(c) for c in runner.calls)
+    assert "你好" in flat or any("ctrl+v" in k for k in key_calls)
 
 
 def test_no_window_reports_404():
@@ -136,17 +140,17 @@ def test_find_window_ignores_search_popup_size(monkeypatch):
     assert engine.find_window() == "10"
 
 
-def test_search_popup_clicked_at_its_own_coords():
-    """搜索结果在独立弹窗里：点「第一条结果」必须相对弹窗坐标，不能套主窗口。"""
+def test_search_popup_is_escaped_not_clicked():
+    """残留的独立「综合搜索」弹窗要 Escape 收掉：点它会把消息打进弹窗。"""
     runner = FakeRunner()
     runner.windows = {"100": ("QQ", 960, 640), "200": ("综合搜索", 680, 680)}
     engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
     r = asyncio.run(engine.send(_req()))
     assert r.ok
     clicks = [c for c in runner.calls if c[1] == "click"]
-    # click 参数形如 [xdotool, click, --window, <id>, x, y]
     targets = [c[3] for c in clicks]
-    assert "200" in targets, "第一条结果应该点在搜索弹窗上"
+    assert "200" not in targets, "不应该往搜索弹窗里点"
+    assert any("Escape" in " ".join(c) for c in runner.calls if c[1] == "key")
 
 
 def test_empty_text_rejected_before_any_call():
@@ -220,3 +224,44 @@ def test_send_rejects_remote_attachment():
     )
     result = asyncio.run(engine.send(request))
     assert not result.ok and result.code == 1404 and "本地文件" in result.msg
+
+
+def test_chinese_prefers_clipboard_paste(monkeypatch):
+    """中文正文优先走剪贴板粘贴（原子写入，不会错字）。
+
+    xdotool type 打非 ASCII 靠临时改 keycode 映射，QQ 读键时机不同就会拿到
+    上一次映射（"验证"→"阿证"、"无"→"阿"），60ms 也不保险，只能兜底。
+    注意 xclip 写入必须**不接管道**，否则 fork 出来的剪贴板守护进程持有
+    管道，run() 会等到 20s 超时并静默退回打字——VM 里所有"阿"字的根因。
+    """
+    monkeypatch.setattr("arklink.ntqq.x11.shutil.which", lambda name: f"/usr/bin/{name}")
+    runner = FakeRunner()
+    engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
+    store = {"clip": b""}
+    writes = []
+
+    def fake_input(args, data, want_stdout=False):
+        if want_stdout:
+            return subprocess.CompletedProcess(list(args), 0, store["clip"], b"")
+        store["clip"] = data
+        writes.append(data.decode("utf-8"))
+        return subprocess.CompletedProcess(list(args), 0, b"", b"")
+
+    engine._run_with_input = fake_input
+    r = asyncio.run(engine.send(_req("修复后重发", "阿潘")))
+    assert r.ok
+    assert "修复后重发" in writes
+    assert any(c[1] == "key" and "ctrl+v" in c for c in runner.calls)
+    # 走剪贴板时不该再逐字打中文
+    assert not any(c[1] == "type" and "修复后重发" in " ".join(c) for c in runner.calls)
+
+
+def test_chinese_falls_back_to_typing_without_xclip():
+    """没有 xclip 时退回逐字打，且间隔要够大（>=40ms）。"""
+    runner = FakeRunner()
+    engine = X11Engine(runner=runner, display=":99", min_gap=0.0, open_delay=0.0)
+    assert engine.type_delay >= 40
+    r = asyncio.run(engine.send(_req("测试", "阿潘")))
+    assert r.ok
+    types = [c for c in runner.calls if c[1] == "type"]
+    assert any("测试" in " ".join(c) for c in types)

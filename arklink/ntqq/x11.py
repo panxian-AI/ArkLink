@@ -42,8 +42,8 @@ logger = logging.getLogger("arklink.ntqq.x11")
 
 #: 会话列表顶部的搜索框（相对窗口左上角，默认布局）
 DEFAULT_SEARCH_XY = (150, 65)
-#: 聊天输入框（窗口比例，默认布局）
-DEFAULT_INPUT_XY = (0.65, 0.87)
+#: 聊天输入框（窗口比例，默认布局；个人聊天与群聊两种布局都落在输入框内）
+DEFAULT_INPUT_XY = (0.62, 0.80)
 
 
 def uri_of(path: str) -> str:
@@ -72,8 +72,10 @@ class X11Engine:
         input_xy: tuple[float, float] = DEFAULT_INPUT_XY,
         #: QQ 搜索结果的独立弹窗标题（点结果要按它的坐标，不能按主窗口的）
         search_popup_name: str = "综合搜索",
-        type_delay: int = 15,
-        open_delay: float = 0.7,
+        #: QQ 的 XTest 键盘事件吃得慢：太快会丢字/重字（"修复后重发"打成
+        #  "修复阿阿潘"）。实测 ≥40ms/字 稳，60ms 留余量
+        type_delay: int = 60,
+        open_delay: float = 1.2,
         #: 粘完附件等多久再回车：客户端要先把文件挂到输入框上
         attach_delay: float = 1.5,
         dry_run: bool = False,
@@ -109,18 +111,32 @@ class X11Engine:
             logger.debug("xdotool 执行失败 %s：%s", args, exc)
             return subprocess.CompletedProcess(cmd, 127, "", str(exc))
 
-    def _run_with_input(self, args: Sequence[str], data: bytes) -> subprocess.CompletedProcess:
-        """跑一个需要从 stdin 喂数据的命令（xclip 就是这么用的）。"""
+    def _run_with_input(
+        self, args: Sequence[str], data: bytes, *, want_stdout: bool = False
+    ) -> subprocess.CompletedProcess:
+        """跑一个需要从 stdin 喂数据的命令（xclip 就是这么用的）。
+
+        **不要随便开 capture_output**：xclip 写完剪贴板会 fork 成常驻的
+        剪贴板 owner，并且继承父进程的 stdout/stderr。一旦这里接了管道，
+        parents 退出了管道还被守护进程拿着，run() 会一直等到 20s 超时、
+        抛异常 → 调用方以为「放剪贴板失败」静默退回逐字打字 → 中文错字。
+        （VM 里查了半天"为什么总有阿字"，根因就是它。）
+        只有真正要读输出（xclip -o）时才用 want_stdout。
+        """
         env = dict(os.environ)
         if self.display:
             env["DISPLAY"] = self.display
+        cmd = list(args)
         try:
+            if want_stdout:
+                return subprocess.run(cmd, input=data, capture_output=True, timeout=20, env=env)
             return subprocess.run(
-                list(args), input=data, capture_output=True, timeout=20, env=env
+                cmd, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20, env=env,
             )
         except Exception as exc:
             logger.debug("命令执行失败 %s：%s", args, exc)
-            return subprocess.CompletedProcess(list(args), 127, b"", str(exc).encode())
+            return subprocess.CompletedProcess(cmd, 127, b"", str(exc).encode())
 
     def _set_clipboard_files(self, paths: Sequence[str]) -> bool:
         """用 xclip 把文件放进剪贴板（`text/uri-list`）。
@@ -224,6 +240,40 @@ class X11Engine:
         # 注意：type 走的是 X 键盘事件，不碰系统剪贴板
         self._xdo("type", "--clearmodifiers", "--delay", str(self.type_delay), text)
 
+    def _set_clipboard_text(self, text: str) -> bool:
+        """把纯文本放进剪贴板，并读回校验内容确实是新的。"""
+        if not shutil.which("xclip"):
+            return False
+        data = text.encode("utf-8")
+        write = ["xclip", "-selection", "clipboard", "-t", "text/plain;charset=utf-8"]
+        read = ["xclip", "-selection", "clipboard", "-o", "-t", "text/plain;charset=utf-8"]
+        for _ in range(3):
+            proc = self._run_with_input(write, data)
+            if proc.returncode != 0:
+                time.sleep(0.25)
+                continue
+            time.sleep(0.2)
+            check = self._run_with_input(read, b"", want_stdout=True)
+            if check.returncode == 0 and check.stdout == data:
+                return True
+        return False
+
+    def _input_text(self, text: str) -> None:
+        """往当前焦点输入框里写文本：优先剪贴板粘贴，失败才逐字打键。
+
+        剪贴板是唯一能保证中文**一字不差**的路径（粘贴是原子的，QQ 一次
+        拿到整串）。xdotool type 打非 ASCII 靠「临时改 keycode 映射→按键→
+        改回」，QQ 读到的时间点不同就会拿到上一次映射（"验证"变"阿证"、
+        "无"变"阿"），60ms 间隔也不保证，只能当兜底。
+        """
+        if not text:
+            return
+        if self._set_clipboard_text(text):
+            self._xdo("key", "--clearmodifiers", "ctrl+v")
+            time.sleep(0.3 + min(len(text), 300) * 0.004)
+            return
+        self._type(text)
+
     async def send(self, request: SendRequest) -> SendResult:
         return self._send_blocking(request)
 
@@ -267,33 +317,39 @@ class X11Engine:
         if width <= 0 or height <= 0:
             width, height = 1000, 800  # 拿不到尺寸就按默认比例点，失败会体现在结果里
 
-        # 1) 会话搜索 → 2) 第一条结果 → 3) 输入框 → 4) 正文 → 5) 回车
+        # 1) 会话搜索 → 2) 回车选第一条结果 → 3) 输入框 → 4) 正文 → 5) 回车
         self._click(wid, self.search_xy[0], self.search_xy[1])
         time.sleep(0.25)
-        self._type(str(request.search_key))
+        # 上一次发送可能在搜索框里留了词：不清空会把两次搜索拼在一起，
+        # 点中的就是错误会话（VM 里踩过，搜索框残留"505阿"）
+        self._xdo("key", "--clearmodifiers", "ctrl+a")
+        self._xdo("key", "--clearmodifiers", "Delete")
+        time.sleep(0.15)
+        self._input_text(str(request.search_key))
         time.sleep(self.open_delay)
-        # 搜索结果是独立弹窗（标题见 search_popup_name），叠在主窗口上方——
-        # 按主窗口坐标点「第一条结果」和输入框会全落进弹窗（真机踩过的坑）
-        popup = self._find_popup()
-        if popup:
-            pw, ph = self._size(popup)
-            # 结果列表在弹窗搜索框下方，取左上区域第一条
-            self._click(popup, max(60, int(pw * 0.15)), min(200, int(ph * 0.25)))
-            time.sleep(self.open_delay + 0.3)
-            # 点中结果后弹窗应自动关；没关就按 Escape 收掉，防止挡住输入框
-            if self._find_popup():
-                self._xdo("key", "--clearmodifiers", "Escape")
-                time.sleep(0.3)
-        else:
-            self._click(wid, self.search_xy[0] + 60, self.search_xy[1] + 91)
-            time.sleep(self.open_delay + 0.3)
+        # 选会话用键盘：搜索下拉里直接回车 = 打开第一条（最匹配的）结果。
+        # 不用鼠标点坐标——结果列表位置随窗口大小/历史记录变化，坐标点
+        # 容易点进"聊天记录"分组或者空白处，会话不打开，正文就会打进
+        # 上一个会话（发错人，VM 里真踩过）。
+        self._xdo("key", "--clearmodifiers", "Return")
+        time.sleep(self.open_delay + 0.3)
+        # 搜索框在会话打开后应自动清空收起；个别版本残留独立"综合搜索"
+        # 弹窗挡在主窗口上方，按 Escape 收掉防止挡住输入框
+        if self._find_popup():
+            self._xdo("key", "--clearmodifiers", "Escape")
+            time.sleep(0.3)
         # 选完会话把主窗口重新拉到前台，输入框的点击/键盘才进得去
         self._activate(wid)
         self._click(wid, int(width * self.input_xy[0]), int(height * self.input_xy[1]))
         time.sleep(0.15)
+        # 输入框同样先清空：上次没发出去的草稿不能拼进这条消息
+        self._xdo("key", "--clearmodifiers", "ctrl+a")
+        self._xdo("key", "--clearmodifiers", "Delete")
+        time.sleep(0.15)
         if text:
-            # xdotool type 走键盘事件，不碰剪贴板，所以文字和附件可以先后放
-            self._type(text)
+            # 中文走剪贴板粘贴（xdotool type 打非 ASCII 会因 keysym 临时映射
+            # 竞态丢字/重字，VM 里"修复后重发"被打成"修复阿阿潘"）
+            self._input_text(text)
             time.sleep(0.15)
         if files:
             if not self._set_clipboard_files(files):

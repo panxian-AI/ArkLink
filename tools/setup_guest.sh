@@ -49,7 +49,7 @@ log "安装基础依赖（虚拟屏幕 / 窗口管理器 / 按键注入 / 中文
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-  xvfb openbox xdotool x11-utils scrot \
+  xvfb openbox xdotool x11-utils scrot imagemagick xclip \
   fonts-wqy-microhei fonts-wqy-zenhei fontconfig \
   libgbm1 "${AUDIO_PKG}" libnss3 libxss1 libxtst6 libatk-bridge2.0-0 libatk1.0-0 \
   libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
@@ -116,8 +116,14 @@ set -u
 export DISPLAY=:${DISPLAY_NUM}
 export LANG=C.UTF-8
 # QQ 必须以**登录用户**身份跑：root 没有 ~/.config/QQ，起来就是扫码页，
-# 而且 /tmp 里的日志文件属主不对会直接 Permission denied 把 QQ 拦在门外
-QQ_USER="${QQ_USER:-$(id -un)}"
+# 而且 /tmp 里的日志文件属主不对会直接 Permission denied 把 QQ 拦在门外。
+# systemd 以 root 起本脚本，所以这里自动挑「有 QQ 登录态的那个用户」。
+QQ_USER="\${QQ_USER:-}"
+if [ -z "\$QQ_USER" ]; then
+  QQ_USER=\$(stat -c %U /home/*/.config/QQ 2>/dev/null | head -1)
+  [ -n "\$QQ_USER" ] || QQ_USER=\$(awk -F: '\$3>=1000 && \$3<60000 {print \$1; exit}' /etc/passwd)
+  [ -n "\$QQ_USER" ] || QQ_USER=root
+fi
 
 # 只看"活不活着"，不看"进程在不在"——Xvfb 僵死（进程在但屏幕黑）是最常见的坑
 display_ok() { xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; }
@@ -125,6 +131,66 @@ display_ok() { xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; }
 qq_alive() {
   # 用 pgrep -x 精确匹配可执行名，避免匹配到命令行里带这个字符串的 shell 自己
   pgrep -x qq >/dev/null 2>&1 || pgrep -f "^/opt/QQ/qq" >/dev/null 2>&1
+}
+
+# 登录窗口固定 320x460；认这个尺寸就能把它和 1x1/16x16 的辅助窗口、
+# 登录后的主窗口、搜索弹窗区分开
+is_login_window() {
+  [ "\$1" -ge 300 ] && [ "\$1" -le 360 ] && [ "\$2" -ge 420 ] && [ "\$2" -le 500 ]
+}
+
+# 二维码过期 → 自动点「刷新」。
+# 判据：二维码卡片区域出现成片的红色像素（"当前二维码已过期" 那行红字）。
+# 旧码本来就已经失效，点刷新不会打断任何正在进行的扫码。
+qr_refresh() {
+  command -v convert >/dev/null 2>&1 || return 0
+  local id X Y WIDTH HEIGHT shot red rx ry
+  shot=/tmp/.ark_qr.png
+  for id in \$(xdotool search --onlyvisible --name '^QQ\$' 2>/dev/null); do
+    eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
+    is_login_window "\$WIDTH" "\$HEIGHT" || continue
+    scrot -o "\$shot" >/dev/null 2>&1 || return 0
+    # 卡片区在窗口内的相对位置：x 60..260，y 110..310
+    rx=\$((X + 60)); ry=\$((Y + 110))
+    # 红字判据：R>180 且 G/B<130（"当前二维码已过期" 就是这种红）
+    red=\$(convert "\$shot" -crop 200x200+\${rx}+\${ry} txt:- 2>/dev/null | awk -F'[(,)]' 'NR>1 && \$2+0>180 && \$3+0<130 && \$4+0<130 {n++} END{print n+0}')
+    rm -f "\$shot"
+    # 防抖：连续两轮都检测到红字才动手，避免把「正在自动登录」的过渡画面误当过期
+    local state=/tmp/.ark_qr_red n
+    if [ "\${red:-0}" -gt 120 ]; then
+      n=\$(cat "\$state" 2>/dev/null || echo 0)
+      if [ "\$n" -lt 1 ]; then echo 1 > "\$state"; return 0; fi
+      echo 0 > "\$state"
+      xdotool windowactivate "\$id" 2>/dev/null; sleep 0.4
+      xdotool mousemove --window "\$id" 160 281 click 1 2>/dev/null
+      echo "[\$(date '+%F %T')] QR expired -> clicked refresh"
+      sleep 1
+    else
+      echo 0 > "\$state" 2>/dev/null || true
+    fi
+  done
+}
+
+# 更新提示之类的弹窗：可见、标题带 QQ、尺寸像对话框 → Escape 收掉。
+# 登录主窗口（320x460）和主界面大窗口都排除，1x1/16x16 辅助窗口也排除。
+dismiss_popups() {
+  local id X Y WIDTH HEIGHT name
+  for id in \$(xdotool search --onlyvisible --name '.' 2>/dev/null); do
+    name=\$(xdotool getwindowname "\$id" 2>/dev/null) || continue
+    case "\$name" in *[Qq][Qq]*) ;; *) continue ;; esac
+    eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
+    [ "\$WIDTH" -gt 50 ] && [ "\$HEIGHT" -gt 50 ] || continue
+    [ "\$WIDTH" -lt 600 ] && [ "\$HEIGHT" -lt 600 ] || continue
+    is_login_window "\$WIDTH" "\$HEIGHT" && continue
+    xdotool windowactivate "\$id" 2>/dev/null; sleep 0.3
+    xdotool key Escape 2>/dev/null
+    echo "[\$(date '+%F %T')] dismissed popup: \$name (\${WIDTH}x\${HEIGHT})"
+  done
+}
+
+watchdog() {
+  dismiss_popups
+  qr_refresh
 }
 
 heal() {
@@ -155,10 +221,11 @@ heal() {
 }
 
 heal
+watchdog
 
 # Arklink 控制面：只监听本机，外面通过端口映射/隧道访问
-/opt/arklink-venv/bin/python -m arklink serve webui \\
-  --host 0.0.0.0 --port 6800 --engine x11 &
+# （故意写成一行：heredoc 里行尾续行符容易被转义规则搞坏，一行最稳）
+/opt/arklink-venv/bin/python -m arklink serve webui --host 0.0.0.0 --port 6800 --engine x11 &
 WEBUI=\$!
 
 # 监督循环：webui 活着就一直体检；webui 死了再 heal 一轮后退出，
@@ -166,6 +233,7 @@ WEBUI=\$!
 while kill -0 \$WEBUI 2>/dev/null; do
   sleep 20
   heal
+  watchdog
 done
 heal
 wait \$WEBUI
@@ -184,6 +252,10 @@ Type=simple
 ExecStart=/opt/arklink/start.sh
 Restart=always
 RestartSec=5
+# 关键：只杀 start.sh 自己，别连带 Xvfb / openbox / QQ。
+# 默认 control-group 会把整组一起 SIGKILL：QQ 来不及把登录令牌落盘，
+# 下次启动又变成"新设备"，手机上每次都弹新设备确认。真机踩过。
+KillMode=process
 # QQ 需要的临时目录与共享内存
 PrivateTmp=no
 Environment=LANG=C.UTF-8
