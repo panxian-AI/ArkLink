@@ -20,7 +20,16 @@ AstrBot/LangBot 之类框架直接递进来的 dict
 | `at`         | 1（带 atType/atUid）      | 文本元素 + @ 属性 |
 | `face`       | 6                        | 小黄脸，按 id |
 | `reply`      | 1（前面拼引用）           | 原生引用要 msgId，先降级成文本 |
-| `image`      | 2                        | 需要先上传，v1 直接拒绝 |
+| `image`      | 2                        | 需要先上传；UI 通道用剪贴板粘贴 |
+| `file` / `video` / `record` | 待定         | 同上，按本地文件粘贴过去 |
+
+关于附件：`image` / `file` / `video` / `record` 的 `file` 字段可以是**本地路径**，
+也可以是 URL。两者走的路完全不同——
+
+* 本地路径：剪贴板 `CF_HDROP` 直接粘进输入框，不需要注入、不需要上传接口；
+* URL / base64：必须先把字节下载下来落盘，否则粘不进去。
+
+所以这里只做「认出来 + 分好类」，落盘与能力判断留给上层。
 """
 
 from __future__ import annotations
@@ -34,8 +43,36 @@ ELEMENT_TEXT = 1
 ELEMENT_PICTURE = 2
 ELEMENT_FACE = 6
 
+#: 需要伴随文件才能发的段。它们的共同点是 `file` 字段指向一个真实文件。
+ATTACHMENT_KINDS = ("image", "file", "video", "record")
+
+#: 一份附件最多带几个：粘贴多个文件时客户端会排队上传，
+#: 太多既慢又容易触发风控，所以在这里设个闸。
+MAX_ATTACHMENTS = 10
+
 _CQ = re.compile(r"\[CQ:([a-zA-Z_]+)((?:,[^\]]*)?)\]")
 _CQ_ARG = re.compile(r",([a-zA-Z_]+)=([^,\]]*)")
+
+#: 认得出是「远程资源」而不是本地路径的前缀
+_REMOTE_PREFIXES = ("http://", "https://", "base64://", "data:", "file://")
+
+
+def looks_remote(value: str) -> bool:
+    """这个 `file` 字段是不是远程/内联资源（而不是本地路径）。"""
+    return str(value or "").strip().lower().startswith(_REMOTE_PREFIXES)
+
+
+def file_of(data: dict[str, Any]) -> str:
+    """从段数据里取文件位置：file → path → url，OneBot 实现们各有各的写法。"""
+    for key in ("file", "path", "url"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+#: 兼容旧名（模块内部原先叫 `_file_of`）
+_file_of = file_of
 
 
 @dataclass
@@ -109,6 +146,8 @@ def _parse_cq(text: str) -> list[Element]:
             out.append(Element("at", qq=args.get("qq", "")))
         elif kind == "face":
             out.append(Element("face", id=args.get("id", "")))
+        elif kind in ATTACHMENT_KINDS:
+            out.append(Element(kind, file=_file_of(args), raw=dict(args)))
         else:  # 不认识的 CQ 码保留原文，至少不丢字
             out.append(Element("text", text=match.group(0)))
         pos = match.end()
@@ -136,10 +175,12 @@ def _segments(items: list[Any]) -> list[Element]:
         elif kind == "face":
             out.append(Element("face", id=str(data.get("id", ""))))
         elif kind == "image":
-            out.append(Element("image", file=str(data.get("file") or data.get("url") or "")))
+            out.append(Element("image", file=_file_of(data), raw=data))
         elif kind == "reply":
             out.append(Element("reply", id=str(data.get("id", ""))))
-        elif kind in ("json", "xml", "markdown", "music", "video", "record", "file"):
+        elif kind in ("file", "video", "record"):
+            out.append(Element(kind, file=_file_of(data), raw=data))
+        elif kind in ("json", "xml", "markdown", "music"):
             out.append(Element(kind, raw=data))
         elif kind == "":
             raise MessageError("消息段缺少 type")
@@ -162,7 +203,7 @@ def _merge_text(items: list[Element]) -> list[Element]:
 
 
 def plain_text(elements: Iterable[Element]) -> str:
-    """给日志/预览用的纯文本（@ 变成 @QQ号）。"""
+    """给日志/预览用的纯文本（@ 变成 @QQ号，附件变成占位符）。"""
     parts: list[str] = []
     for el in elements:
         if el.kind == "text":
@@ -175,30 +216,87 @@ def plain_text(elements: Iterable[Element]) -> str:
             parts.append("")
         elif el.kind == "image":
             parts.append("[图片]")
+        elif el.kind == "file":
+            parts.append("[文件]")
+        elif el.kind == "video":
+            parts.append("[视频]")
+        elif el.kind == "record":
+            parts.append("[语音]")
         else:
             parts.append(f"[{el.kind}]")
     return "".join(parts).strip()
 
 
-def supported(elements: Iterable[Element]) -> tuple[list[Element], list[Element]]:
-    """拆成（能发的, 不能发的）。v1 只支持 text/at/face。"""
+def text_length(elements: Iterable[Element]) -> int:
+    """只数文字，不数附件占位符——否则长度上限会被 `[图片]` 这类字样吃掉。"""
+    return sum(len(el.text) for el in elements if el.kind == "text")
+
+
+def attachments(elements: Iterable[Element]) -> list[Element]:
+    """取出所有需要伴随文件的段。"""
+    return [el for el in elements if el.kind in ATTACHMENT_KINDS]
+
+
+def split_attachments(elements: Iterable[Element]) -> tuple[list[str], list[Element]]:
+    """把附件拆成（能直接粘贴的本地路径, 需要先落盘的远程段）。
+
+    远程段不做自动下载：超时、重定向、大小上限、落盘到哪儿、失败了重试几次，
+    每一个都得有明确的答案，塞进发送路径只会让「为什么发不出去」更难查。
+    所以这里只负责认出来，由上层回一句「先把文件下到本地，再传路径」。
+    """
+    paths: list[str] = []
+    remote: list[Element] = []
+    for el in attachments(elements):
+        target = (el.file or "").strip()
+        if not target:
+            remote.append(el)
+        elif looks_remote(target):
+            remote.append(el)
+        elif target not in paths:
+            paths.append(target)
+    return paths, remote
+
+
+def supported(
+    elements: Iterable[Element],
+    *,
+    kinds: Iterable[str] = ("text", "at", "face"),
+) -> tuple[list[Element], list[Element]]:
+    """按通道能发的段类型拆成（能发的, 不能发的）。"""
+    allow = set(kinds)
     ok: list[Element] = []
     bad: list[Element] = []
     for el in elements:
-        (ok if el.kind in ("text", "at", "face") else bad).append(el)
+        (ok if el.kind in allow else bad).append(el)
     return ok, bad
 
 
+#: 段类型全集：认不出的一律当错误，而不是硬塞成文本发出去
+KNOWN_KINDS = frozenset(
+    ("text", "at", "face", "reply", "json", "xml", "markdown", "music", *ATTACHMENT_KINDS)
+)
+
+
 def validate(elements: list[Element], *, max_length: int = 3000) -> None:
-    """发之前先过一遍；有问题直接抛 `MessageError`。"""
+    """发之前先过一遍**形状**：空消息、未知段、超长。
+
+    这里刻意不判断「这个通道能不能发附件」——那是 `caps` 的事。
+    两件事混在一层，会出现「换个通道就能过校验」的隐式行为，
+    调用方根本没法从错误里看出该改通道还是该改消息。
+    """
     if not elements:
         raise MessageError("消息为空（全是空文本？）")
-    text = plain_text(elements)
-    if not text:
-        raise MessageError("消息没有可发的文字内容")
-    if len(text) > max_length:
-        raise MessageError(f"消息 {len(text)} 字，超过上限 {max_length}")
-    ok, bad = supported(elements)
-    if bad:
-        kinds = "、".join(sorted({el.kind for el in bad}))
-        raise MessageError(f"暂时不支持这些消息段：{kinds}")
+    unknown = sorted({el.kind for el in elements if el.kind not in KNOWN_KINDS})
+    if unknown:
+        raise MessageError(f"不认识这些消息段：{'、'.join(unknown)}")
+    length = text_length(elements)
+    if length > max_length:
+        raise MessageError(f"消息 {length} 字，超过上限 {max_length}")
+    has_content = any(
+        (el.kind == "text" and bool(el.text.strip())) or el.kind != "text" for el in elements
+    )
+    if not has_content:
+        raise MessageError("消息没有可发的内容（文本全是空白？）")
+    count = len(attachments(elements))
+    if count > MAX_ATTACHMENTS:
+        raise MessageError(f"一条消息最多带 {MAX_ATTACHMENTS} 个附件，收到 {count} 个")

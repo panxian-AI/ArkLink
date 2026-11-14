@@ -107,3 +107,62 @@ def test_available_needs_window():
     assert engine.available is False
     engine2 = X11Engine(runner=FakeRunner(window="999"), display=":99")
     assert engine2.available is True
+
+
+# ---------------------------------------------------------------- 附件（xclip）
+
+def test_uri_of_percent_encodes():
+    """text/uri-list 要百分号编码，否则带空格/中文的文件名解析不出来。"""
+    from arklink.ntqq.x11 import uri_of
+
+    uri = uri_of("/tmp/a b.png")
+    assert uri.startswith("file://")
+    assert "%20" in uri
+
+
+def test_set_clipboard_files_uses_uri_list(monkeypatch):
+    import arklink.ntqq.x11 as X
+
+    engine = X11Engine()
+    seen: dict = {}
+
+    def fake_run(args, data):
+        seen["args"], seen["data"] = list(args), data
+        return subprocess.CompletedProcess(list(args), 0, b"", b"")
+
+    monkeypatch.setattr(X.shutil, "which", lambda name: "/usr/bin/xclip")
+    monkeypatch.setattr(engine, "_run_with_input", fake_run)
+    assert engine._set_clipboard_files(["/tmp/a.png"]) is True
+    assert "xclip" in seen["args"][0] and "text/uri-list" in seen["args"]
+    assert seen["data"].startswith(b"file://")
+
+
+def test_set_clipboard_files_without_xclip(monkeypatch):
+    import arklink.ntqq.x11 as X
+
+    engine = X11Engine()
+    monkeypatch.setattr(X.shutil, "which", lambda name: None)
+    assert engine._set_clipboard_files(["/tmp/a.png"]) is False
+    assert "xclip" in engine.last_action
+
+
+def test_send_with_attachment_dry_run():
+    engine = X11Engine(dry_run=True)
+    request = SendRequest(
+        chat_type=2,
+        peer_uid="测试对象",
+        elements=[Element(kind="image", file="/tmp/a.png")],
+    )
+    result = asyncio.run(engine.send(request))
+    assert result.ok and "1 个附件" in engine.last_action
+
+
+def test_send_rejects_remote_attachment():
+    engine = X11Engine(dry_run=True)
+    request = SendRequest(
+        chat_type=2,
+        peer_uid="测试对象",
+        elements=[Element(kind="image", file="https://x/a.png")],
+    )
+    result = asyncio.run(engine.send(request))
+    assert not result.ok and result.code == 1404 and "本地文件" in result.msg

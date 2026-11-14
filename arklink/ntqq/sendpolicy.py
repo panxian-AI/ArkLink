@@ -347,9 +347,10 @@ class SendPolicy:
             )
         return Decision(True, peer=peer)
 
-    def check_length(self, text: str) -> Decision:
-        if len(text) > self.max_length:
-            return Decision(False, CODE_BAD_REQUEST, f"单条消息 {len(text)} 字，超过上限 {self.max_length}")
+    def check_length(self, length: int) -> Decision:
+        """`length` 只算文字字符数；附件占位符不计入额度。"""
+        if length > self.max_length:
+            return Decision(False, CODE_BAD_REQUEST, f"单条消息 {length} 字，超过上限 {self.max_length}")
         return Decision(True)
 
     def describe(self) -> str:

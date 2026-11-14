@@ -58,6 +58,25 @@ class SendRequest:
     def text(self) -> str:
         return el.plain_text(self.elements)
 
+    @property
+    def caption(self) -> str:
+        """附件消息的文字部分：只要真文字，不要 `[图片]` 这类占位符。
+
+        剪贴板通道是「先粘文字、再粘文件」，这里要是把占位符一起粘进去，
+        收件人会看到一句「[图片]」外加一张图——所以两者必须分开。
+        """
+        return "".join(e.text for e in self.elements if e.kind == "text").strip()
+
+    @property
+    def files(self) -> list[str]:
+        """能直接粘贴过去的本地文件路径。"""
+        return el.split_attachments(self.elements)[0]
+
+    @property
+    def remote_files(self) -> list[el.Element]:
+        """要发但拿不到本地字节的附件段（URL / base64）。"""
+        return el.split_attachments(self.elements)[1]
+
     def body(self) -> bytes:
         payload = {
             "uin": self.uin,
@@ -112,6 +131,8 @@ class DryRunEngine:
     """只记录不发送。默认引擎，也是「策略试跑」的开关。"""
 
     name = "dry-run"
+    #: 演练照收附件：验证链路通不通，本来就不需要真的发出去
+    supports_attachments = True
 
     def __init__(self) -> None:
         self.sent: list[SendRequest] = []
@@ -122,12 +143,14 @@ class DryRunEngine:
 
     async def send(self, request: SendRequest) -> SendResult:
         self.sent.append(request)
+        files = request.files
         logger.info(
-            "[dry-run] → %s(%s) %r len=%d",
+            "[dry-run] → %s(%s) %r len=%d%s",
             request.peer_uid,
             request.chat_type,
             request.text[:40],
             len(request.text),
+            f" files={len(files)}" if files else "",
         )
         return SendResult(
             ok=True,
@@ -135,12 +158,17 @@ class DryRunEngine:
             msg="dry-run：没有真的发送",
             engine=self.name,
             dry_run=True,
-            text=request.text,
+            # text 表示「实际发出去的文字」：有附件时不含 [图片] 这类占位符，
+            # 与 HostEngine 保持一致，否则演练结果和真实结果对不上
+            text=request.caption if files else request.text,
             echo=request.echo,
+            extra={"attachments": len(files)} if files else {},
         )
 
 
 class PipeEngine:
+    #: DLL 侧只实现了文本元素，图片/文件的发送还没落地
+    supports_attachments = False
     """把请求交给注入的 DLL：`cmd=arklink.send`，body 是 JSON。
 
     约定（DLL 侧必须一致）：
@@ -216,12 +244,14 @@ class HostEngine:
     发出去。于是这一版走「把文本交给客户端」——不是拼包、不是伪造协议，
     消息由官方客户端产生，风控看到的就是用户自己在打字。
 
-    代价要说清楚：只支持纯文本、会抢焦点、依赖界面语言与快捷键。
-    所以它是 `SendEngine`，不是唯一实现：`PipeEngine`（进程内直调）接好后
-    换引擎即可，上层零改动。
+    代价要说清楚：会抢焦点、依赖界面语言与快捷键；附件走剪贴板粘贴，
+    所以只能发**本机已有**的文件（URL 要先落盘）。所以它是 `SendEngine`，
+    不是唯一实现：`PipeEngine`（进程内直调）接好后换引擎即可，上层零改动。
     """
 
     name = "host"
+    #: 剪贴板粘文件：本地路径直接可用，不需要上传接口
+    supports_attachments = True
 
     def __init__(
         self,
@@ -309,10 +339,35 @@ class HostEngine:
                 text=request.text,
                 echo=request.echo,
             )
-        text = request.text
-        if not text:
+        files = request.files
+        remote = request.remote_files
+        if remote:
+            kinds = "、".join(sorted({e.kind for e in remote}))
+            return SendResult(
+                ok=False,
+                code=1404,
+                msg=(
+                    f"附件只有地址没有本地文件（{kinds}）：剪贴板只能粘已经在本机的文件，"
+                    "请先把它下载到磁盘，再把路径放进 file 字段"
+                ),
+                engine=self.name,
+                text=request.text,
+                echo=request.echo,
+            )
+        # 附件消息的文字部分要剔掉 [图片] 这类占位符，否则会连占位符一起粘进去
+        text = request.caption if files else request.text
+        if not text and not files:
             return SendResult(ok=False, code=1400, msg="空消息", engine=self.name, echo=request.echo)
-        ok = self.host.open_and_send(request.search_key, text)
+        if files:
+            sender = getattr(self.host, "open_and_send_files", None)
+            if sender is None:
+                return SendResult(
+                    ok=False, code=1404, msg="这个通道发不了附件", engine=self.name,
+                    text=text, echo=request.echo,
+                )
+            ok = sender(request.search_key, files, text=text)
+        else:
+            ok = self.host.open_and_send(request.search_key, text)
         action = getattr(self.host, "last_action", "")
         if not ok:
             return SendResult(
@@ -323,6 +378,9 @@ class HostEngine:
                 text=text,
                 echo=request.echo,
             )
+        extra: dict[str, Any] = {"via": "client-host", "peer": request.search_key, "action": action}
+        if files:
+            extra["attachments"] = len(files)
         return SendResult(
             ok=True,
             message_id=0,
@@ -330,7 +388,7 @@ class HostEngine:
             engine=self.name,
             text=text,
             echo=request.echo,
-            extra={"via": "client-host", "peer": request.search_key, "action": action},
+            extra=extra,
         )
 
 
@@ -436,12 +494,23 @@ class SendService:
 
         try:
             parsed = el.parse_message(message)
-            length: Decision = self.policy.check_length(el.plain_text(parsed))
+            # 长度只数文字：`[图片]` 这种占位符不该占额度
+            length: Decision = self.policy.check_length(el.text_length(parsed))
             if not length.ok:
                 return self._fail(length.code, length.reason, echo)
             el.validate(parsed, max_length=self.policy.max_length)
         except el.MessageError as exc:
             return self._fail(1400, str(exc), echo)
+
+        # 通道能不能发附件，问引擎自己——放在这里而不是 validate 里，
+        # 是为了让「参数不对」和「这台通道干不了」始终是两种错误码。
+        if el.attachments(parsed) and not getattr(self.engine, "supports_attachments", False):
+            return self._fail(
+                1404,
+                f"发送通道 {getattr(self.engine, 'name', '?')} 发不了附件"
+                "（需要能把本地文件放进剪贴板、或进程内直发的通道）",
+                echo,
+            )
 
         request = SendRequest(
             chat_type=chat_type,

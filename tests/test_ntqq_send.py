@@ -98,13 +98,15 @@ def test_parse_cq_and_segments():
     assert segs[0].kind == "text"
 
 
-def test_validate_rejects_unsupported_and_empty():
+def test_validate_rejects_empty_and_unknown():
     with pytest.raises(el.MessageError):
         el.validate([])
-    with pytest.raises(el.MessageError):
-        el.validate([el.Element(kind="image", file="x.png")])
+    # 纯附件是合法消息：能不能发是通道的事，不是消息形状的事
+    el.validate([el.Element(kind="image", file="x.png")])
     with pytest.raises(el.MessageError):
         el.validate([el.Element(kind="text", text="  ")])
+    with pytest.raises(el.MessageError):
+        el.validate([el.Element(kind="hologram", text="?")])
 
 
 def test_validate_passes_text_at_face():
@@ -136,11 +138,12 @@ def test_service_checks_account_before_engine():
     assert not r.ok and r.code == 1403 and not engine.requests
 
 
-def test_service_rejects_unsupported_segments():
+def test_service_rejects_attachments_on_channel_that_cannot():
+    """引擎不支持附件时给 1404（通道干不了），而不是 1400（参数不对）。"""
     engine = RecordingEngine()
     service = S.SendService(SendPolicy(allowed_uins=("10001",), allowed_peers=("测试对象",)), engine)
     r = asyncio.run(service.send("测试对象", [{"type": "image", "data": {"file": "x"}}], uin="10001"))
-    assert not r.ok and r.code == 1400 and not engine.requests
+    assert not r.ok and r.code == 1404 and not engine.requests
 
 
 def test_service_happy_path_carries_peer_name():
@@ -337,3 +340,129 @@ def test_history_is_bounded():
     for i in range(520):
         service._record(S.SendResult(ok=True, engine="x", text=str(i)))
     assert len(service.history) == 500
+
+
+# ---------------------------------------------------------------- 附件段
+
+def test_segments_carry_local_file_paths():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "file", "data": {"file": "D:/b.pdf"}},
+        {"type": "video", "data": {"file": "C:/c.mp4"}},
+        {"type": "record", "data": {"file": "C:/d.amr"}},
+    ])
+    assert [s.kind for s in segs] == ["image", "file", "video", "record"]
+    assert [s.file for s in segs] == ["C:/a.png", "D:/b.pdf", "C:/c.mp4", "C:/d.amr"]
+
+
+def test_split_attachments_separates_remote():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "image", "data": {"url": "https://x/b.png"}},
+        {"type": "image", "data": {"file": "base64://AAAA"}},
+    ])
+    paths, remote = el.split_attachments(segs)
+    assert paths == ["C:/a.png"]
+    assert len(remote) == 2
+
+
+def test_split_attachments_dedupes_same_file():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    assert el.split_attachments(segs)[0] == ["C:/a.png"]
+
+
+def test_cq_image_becomes_attachment():
+    segs = el.parse_message("[CQ:image,file=C:/a.png]看图")
+    assert [s.kind for s in segs] == ["image", "text"]
+
+
+def test_text_length_ignores_placeholders():
+    segs = el.parse_message([
+        {"type": "text", "data": {"text": "hi"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    assert el.text_length(segs) == 2
+
+
+def test_validate_caps_attachment_count():
+    segs = [el.Element(kind="image", file=f"C:/{i}.png") for i in range(el.MAX_ATTACHMENTS + 1)]
+    with pytest.raises(el.MessageError):
+        el.validate(segs)
+
+
+def test_caption_excludes_placeholders():
+    """附件消息的文字部分不能带 [图片]，否则收件人会看到一句占位符。"""
+    segs = el.parse_message([
+        {"type": "text", "data": {"text": "看这个"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    request = S.SendRequest(chat_type=2, peer_uid="x", elements=segs)
+    assert request.caption == "看这个"
+    assert "[图片]" in request.text
+    assert request.files == ["C:/a.png"]
+
+
+# ---------------------------------------------------------------- 附件段
+
+def test_segments_carry_local_file_paths():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "file", "data": {"file": "D:/b.pdf"}},
+        {"type": "video", "data": {"file": "C:/c.mp4"}},
+        {"type": "record", "data": {"file": "C:/d.amr"}},
+    ])
+    assert [s.kind for s in segs] == ["image", "file", "video", "record"]
+    assert [s.file for s in segs] == ["C:/a.png", "D:/b.pdf", "C:/c.mp4", "C:/d.amr"]
+
+
+def test_split_attachments_separates_remote():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "image", "data": {"url": "https://x/b.png"}},
+        {"type": "image", "data": {"file": "base64://AAAA"}},
+    ])
+    paths, remote = el.split_attachments(segs)
+    assert paths == ["C:/a.png"]
+    assert len(remote) == 2
+
+
+def test_split_attachments_dedupes_same_file():
+    segs = el.parse_message([
+        {"type": "image", "data": {"file": "C:/a.png"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    assert el.split_attachments(segs)[0] == ["C:/a.png"]
+
+
+def test_cq_image_becomes_attachment():
+    segs = el.parse_message("[CQ:image,file=C:/a.png]看图")
+    assert [s.kind for s in segs] == ["image", "text"]
+
+
+def test_text_length_ignores_placeholders():
+    segs = el.parse_message([
+        {"type": "text", "data": {"text": "hi"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    assert el.text_length(segs) == 2
+
+
+def test_validate_caps_attachment_count():
+    segs = [el.Element(kind="image", file=f"C:/{i}.png") for i in range(el.MAX_ATTACHMENTS + 1)]
+    with pytest.raises(el.MessageError):
+        el.validate(segs)
+
+
+def test_caption_excludes_placeholders():
+    """附件消息的文字部分不能带 [图片]，否则收件人会看到一句占位符。"""
+    segs = el.parse_message([
+        {"type": "text", "data": {"text": "看这个"}},
+        {"type": "image", "data": {"file": "C:/a.png"}},
+    ])
+    request = S.SendRequest(chat_type=2, peer_uid="x", elements=segs)
+    assert request.caption == "看这个"
+    assert "[图片]" in request.text
+    assert request.files == ["C:/a.png"]

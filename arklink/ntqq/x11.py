@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Callable, Sequence
+from urllib.parse import quote
 
 from .send import SendRequest, SendResult
 
@@ -45,10 +46,22 @@ DEFAULT_SEARCH_XY = (150, 65)
 DEFAULT_INPUT_XY = (0.65, 0.87)
 
 
+def uri_of(path: str) -> str:
+    """本机路径 → `file://` URI。
+
+    `text/uri-list` 要的是百分号编码后的形式：直接塞原始路径的话，
+    文件名里带空格或中文就会解析失败，而且失败得毫无提示。
+    """
+    text = os.path.abspath(os.path.expanduser(str(path)))
+    return "file://" + quote(text, safe="/")
+
+
 class X11Engine:
     """用 xdotool 操作 Xvfb 里的 QQ。名字与 `SendEngine` 协议一致。"""
 
     name = "x11"
+    #: 剪贴板粘文件（xclip 提供 text/uri-list），不需要注入
+    supports_attachments = True
 
     def __init__(
         self,
@@ -59,6 +72,8 @@ class X11Engine:
         input_xy: tuple[float, float] = DEFAULT_INPUT_XY,
         type_delay: int = 15,
         open_delay: float = 0.7,
+        #: 粘完附件等多久再回车：客户端要先把文件挂到输入框上
+        attach_delay: float = 1.5,
         dry_run: bool = False,
         runner: Callable[[Sequence[str]], subprocess.CompletedProcess] | None = None,
         min_gap: float = 0.35,
@@ -69,6 +84,7 @@ class X11Engine:
         self.input_xy = (float(input_xy[0]), float(input_xy[1]))
         self.type_delay = int(type_delay)
         self.open_delay = float(open_delay)
+        self.attach_delay = float(attach_delay)
         self.dry_run = dry_run
         self.min_gap = float(min_gap)
         self._run_impl = runner or self._default_run
@@ -89,6 +105,38 @@ class X11Engine:
         except Exception as exc:  # 没装 / DISPLAY 不通
             logger.debug("xdotool 执行失败 %s：%s", args, exc)
             return subprocess.CompletedProcess(cmd, 127, "", str(exc))
+
+    def _run_with_input(self, args: Sequence[str], data: bytes) -> subprocess.CompletedProcess:
+        """跑一个需要从 stdin 喂数据的命令（xclip 就是这么用的）。"""
+        env = dict(os.environ)
+        if self.display:
+            env["DISPLAY"] = self.display
+        try:
+            return subprocess.run(
+                list(args), input=data, capture_output=True, timeout=20, env=env
+            )
+        except Exception as exc:
+            logger.debug("命令执行失败 %s：%s", args, exc)
+            return subprocess.CompletedProcess(list(args), 127, b"", str(exc).encode())
+
+    def _set_clipboard_files(self, paths: Sequence[str]) -> bool:
+        """用 xclip 把文件放进剪贴板（`text/uri-list`）。
+
+        和 Windows 的 `CF_HDROP` 是同一件事的两种写法：X11 侧接收方靠
+        uri-list 拿到路径，客户端自己去读文件。同样只能放**本机已有**的文件。
+        """
+        if not shutil.which("xclip"):
+            self.last_action = "x11: 没装 xclip，放不了文件到剪贴板（apt install xclip）"
+            return False
+        payload = "".join(uri_of(p) + "\r\n" for p in paths).encode("utf-8")
+        proc = self._run_with_input(
+            ["xclip", "-selection", "clipboard", "-t", "text/uri-list"], payload
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or b"").decode("utf-8", "replace").strip()
+            self.last_action = f"x11: xclip 写入失败（{detail or proc.returncode}）"
+            return False
+        return True
 
     @property
     def available(self) -> bool:
@@ -136,11 +184,25 @@ class X11Engine:
         return self._send_blocking(request)
 
     def _send_blocking(self, request: SendRequest) -> SendResult:
-        text = request.text
-        if not text:
+        files = request.files
+        remote = request.remote_files
+        if remote:
+            kinds = "、".join(sorted({e.kind for e in remote}))
+            return SendResult(
+                ok=False, code=1404,
+                msg=(f"附件只有地址没有本地文件（{kinds}）：剪贴板只能放本机文件，"
+                     "请先下载到磁盘再把路径放进 file 字段"),
+                engine=self.name, text=request.text, echo=request.echo,
+            )
+        # 附件消息的文字部分要剔掉 [图片] 这类占位符
+        text = request.caption if files else request.text
+        if not text and not files:
             return SendResult(ok=False, code=1400, msg="空消息", engine=self.name, echo=request.echo)
         if self.dry_run:
-            self.last_action = f"[dry-run] x11 → {request.search_key}: {text[:40]!r}"
+            self.last_action = (
+                f"[dry-run] x11 → {request.search_key}: {text[:40]!r}"
+                + (f" + {len(files)} 个附件" if files else "")
+            )
             logger.info(self.last_action)
             return SendResult(ok=True, dry_run=True, engine=self.name, text=text, echo=request.echo,
                               msg="dry-run：没有真的发送")
@@ -170,12 +232,25 @@ class X11Engine:
         time.sleep(self.open_delay + 0.3)
         self._click(wid, int(width * self.input_xy[0]), int(height * self.input_xy[1]))
         time.sleep(0.15)
-        self._type(text)
-        time.sleep(0.15)
+        if text:
+            # xdotool type 走键盘事件，不碰剪贴板，所以文字和附件可以先后放
+            self._type(text)
+            time.sleep(0.15)
+        if files:
+            if not self._set_clipboard_files(files):
+                return SendResult(ok=False, code=1404, msg=f"放文件到剪贴板失败：{self.last_action}",
+                                  engine=self.name, text=text, echo=request.echo)
+            self._xdo("key", "--clearmodifiers", "ctrl+v")
+            time.sleep(self.attach_delay)
         self._xdo("key", "--clearmodifiers", "Return")
         self._last = time.time()
-        self.last_action = f"x11 → {request.search_key}: {len(text)} 字"
+        self.last_action = f"x11 → {request.search_key}: {len(text)} 字" + (
+            f" + {len(files)} 个附件" if files else ""
+        )
         logger.info(self.last_action)
+        extra: dict[str, Any] = {"via": "x11", "window": wid, "display": self.display}
+        if files:
+            extra["attachments"] = len(files)
         return SendResult(
             ok=True,
             message_id=0,
@@ -183,5 +258,5 @@ class X11Engine:
             engine=self.name,
             text=text,
             echo=request.echo,
-            extra={"via": "x11", "window": wid, "display": self.display},
+            extra=extra,
         )

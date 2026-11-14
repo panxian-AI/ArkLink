@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .bus import MessageBus
 from . import caps as caps_mod
+from .ntqq import elements as el
 from .ntqq.send import SendService
 from .ntqq.sendpolicy import SendPolicy, policy_path
 
@@ -42,6 +43,39 @@ DEFAULT_PORT = 6900
 
 #: token 与地址落盘位置。别人接的时候 `cat ~/.arklink/api.json` 就能拿到。
 DEFAULT_STATE = "~/.arklink/api.json"
+
+#: 需要伴随文件的段 → 查哪条能力。语音/视频按「文件」算：剪贴板粘过去
+#: 就是一个文件附件，客户端不会替你转成语音条或视频预览。
+ATTACHMENT_SEGMENTS = (
+    ("image", "image"),
+    ("file", "file"),
+    ("video", "file"),
+    ("record", "file"),
+)
+
+
+def attachment_problem(segments: list[dict[str, Any]]) -> tuple[str, str] | None:
+    """找出「拿不到本地字节」的附件段，返回 (段类型, 原因)。
+
+    为什么在 HTTP 层就拦：剪贴板只能粘本机上真实存在的文件。等到引擎里才发现
+    要下载，调用方拿到的会是一句含糊的发送失败，还得自己去猜是路径写错了
+    还是格式不对。这里直接说清楚，改起来只要一步。
+    """
+    for seg in segments:
+        kind = str(seg.get("type") or "")
+        if kind not in el.ATTACHMENT_KINDS:
+            continue
+        data = seg.get("data")
+        target = el.file_of(data if isinstance(data, dict) else {})
+        if not target:
+            return kind, "缺少 file 字段（要么给本机路径，要么给能下载的地址）"
+        if el.looks_remote(target):
+            return kind, f"给的是地址而不是本机文件：{target[:60]}"
+        # 文件不存在时剪贴板照样「写入成功」，回车后只把文字发出去——静默失败。
+        # 所以在这里就拦住，别让调用方拿到一个 ok:true 却什么附件都没发。
+        if not Path(target).expanduser().is_file():
+            return kind, f"本机找不到这个文件：{target}"
+    return None
 
 
 def state_path() -> Path:
@@ -163,14 +197,26 @@ class ApiServer:
         if isinstance(raw_msg, (list, tuple)) and raw_msg:
             # 结构化消息（OneBot 段数组）：文本之外的段先看通道支不支持，
             # 不支持就直接告诉调用方缺什么，而不是让它发出去一段 [图片] 占位符。
-            kinds = {str(seg.get("type")) for seg in raw_msg if isinstance(seg, dict)}
-            for kind, key in (("image", "image"), ("face", "face"), ("at", "at"), ("reply", "reply")):
+            segs = [seg for seg in raw_msg if isinstance(seg, dict)]
+            kinds = {str(seg.get("type")) for seg in segs}
+            for kind, key in ATTACHMENT_SEGMENTS + (
+                ("face", "face"), ("at", "at"), ("reply", "reply"),
+            ):
                 if kind in kinds:
                     missing = caps_mod.require(channel, key)
                     if missing is not None:
                         return HTTPStatus.BAD_REQUEST, {
                             "ok": False, "code": 1404, "msg": missing.reason, "need": missing.need,
                         }
+            problem = attachment_problem(segs)
+            if problem is not None:
+                kind, why = problem
+                return HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "code": 1404,
+                    "msg": f"{kind} 段发不出去：{why}",
+                    "need": "剪贴板只能粘本机已有的文件，先把文件下载到磁盘再把路径放进 file 字段",
+                }
             bodies: list[Any] = [list(raw_msg)]
         else:
             raw_text = payload.get("text", raw_msg if isinstance(raw_msg, str) else "")

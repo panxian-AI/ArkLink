@@ -26,12 +26,14 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
+import struct
 import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..base import LinkAdapter, api_error
+from . import elements as el
 
 logger = logging.getLogger("arklink.ntqq.host")
 
@@ -105,7 +107,11 @@ class INPUT(ctypes.Structure):
 
 
 CF_UNICODETEXT = 13
+#: 剪贴板里的「文件列表」。QQ 输入框收到这个会当成待发送的附件（图片直接预览成图）。
+CF_HDROP = 15
 GMEM_MOVEABLE = 0x0002
+#: DROPFILES 结构在 x64 上的字节数：DWORD(4) + POINT(8) + BOOL(4) + BOOL(4)
+DROPFILES_SIZE = 20
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 VK_RETURN = 0x0D
@@ -156,6 +162,50 @@ def parse_hotkey(spec: str) -> tuple[list[int], int]:
     if not (0x30 <= vk <= 0x5A or 0x70 <= vk <= 0x87):  # 0-9 / A-Z / F1-F24
         raise ValueError(f"不支持的按键 {key!r}")
     return mods, vk
+
+
+def build_dropfiles(paths: Iterable[str]) -> bytes:
+    """构造 `CF_HDROP` 的剪贴板数据：DROPFILES 头 + UTF-16LE 路径列表。
+
+    布局（x64）::
+
+        [0:4]    pFiles  路径列表相对结构体起点的偏移，固定 20
+        [4:12]   pt      拖放坐标；粘贴场景用不到，填 0
+        [12:16]  fNC     是否非客户区，0
+        [16:20]  fWide   1 表示宽字符（UTF-16LE）
+        [20:]    path1\\0 path2\\0 \\0
+
+    路径之间用单个 `\\0` 分隔，**整个列表再补一个 `\\0` 收尾**（双 null）。
+    少了最后那个 null，接收方会读越界或干脆忽略这次粘贴——这是 CF_HDROP
+    最常见的坑，且现象是「静默不生效」，很难查。
+    """
+    items = [str(p) for p in paths if str(p)]
+    if not items:
+        return b""
+    head = struct.pack("<IiiII", DROPFILES_SIZE, 0, 0, 0, 1)
+    body = b"".join(p.encode("utf-16-le") + b"\x00\x00" for p in items) + b"\x00\x00"
+    return head + body
+
+
+def parse_dropfiles(data: bytes) -> list[str]:
+    """把 `build_dropfiles` 的产物解回路径列表（自检与排障用）。"""
+    if len(data) < DROPFILES_SIZE:
+        return []
+    offset = struct.unpack("<I", data[:4])[0]
+    if not DROPFILES_SIZE <= offset <= len(data):
+        return []
+    text = data[offset:]
+    # 每个路径以 \0 结尾，最后一个 \0 是列表终止符，解码后会多出一个空串
+    out, start = [], 0
+    while start + 1 < len(text):
+        if text[start : start + 2] == b"\x00\x00":
+            break
+        end = start
+        while end + 1 < len(text) and text[end : end + 2] != b"\x00\x00":
+            end += 2
+        out.append(text[start:end].decode("utf-16-le", "replace"))
+        start = end + 2
+    return out
 
 
 @dataclass
@@ -330,8 +380,9 @@ class _Win32:
         return False
 
     # ---- 剪贴板 ----
-    def set_clipboard(self, text: str) -> bool:
-        if not self.ok:
+    def _set_raw(self, fmt: int, data: bytes) -> bool:
+        """把一段原始字节放进剪贴板（调用方负责拼好 fmt 对应的布局）。"""
+        if not self.ok or not data:
             return False
         u = self.user32
         k = self.kernel32
@@ -339,17 +390,25 @@ class _Win32:
             return False
         try:
             u.EmptyClipboard()
-            data = text.encode("utf-16-le") + b"\x00\x00"
             handle = k.GlobalAlloc(GMEM_MOVEABLE, len(data))
             if not handle:
                 return False
             ptr = k.GlobalLock(handle)
+            if not ptr:
+                return False
             ctypes.memmove(ptr, data, len(data))
             k.GlobalUnlock(handle)
-            u.SetClipboardData(CF_UNICODETEXT, handle)
-            return True
+            # SetClipboardData 成功后这块内存归系统所有，不能再 GlobalFree
+            return bool(u.SetClipboardData(fmt, handle))
         finally:
             u.CloseClipboard()
+
+    def set_clipboard(self, text: str) -> bool:
+        return self._set_raw(CF_UNICODETEXT, text.encode("utf-16-le") + b"\x00\x00")
+
+    def set_clipboard_files(self, paths: Iterable[str]) -> bool:
+        """把本地文件放进剪贴板：QQ 输入框 Ctrl+V 后会变成待发送的附件。"""
+        return self._set_raw(CF_HDROP, build_dropfiles(paths))
 
     def get_clipboard(self) -> str:
         if not self.ok:
@@ -409,6 +468,9 @@ class ClientHost:
         paste_hotkey: str = "^v",
         send_key: str = "enter",
         open_delay: float = 0.6,
+        #: 粘完附件后等多久再回车。QQ 把文件挂到输入框要一点时间，
+        #: 按早了会只发文字、附件被静默丢掉（客户端不报错），所以宁可多等。
+        attach_delay: float = 1.5,
         dry_run: bool = True,
         uin: str = "",
         candidates: Iterable[str] = (),
@@ -421,6 +483,7 @@ class ClientHost:
         self.paste_hotkey = paste_hotkey
         self.send_key = send_key
         self.open_delay = open_delay
+        self.attach_delay = float(attach_delay)
         self.dry_run = dry_run
         #: 允许操作哪个号。空 = 不校验（不建议，同机多号时会发错）
         self.uin = str(uin or "")
@@ -537,17 +600,96 @@ class ClientHost:
             self.last_action = f"[dry-run] open_and_send peer={peer} text={text[:40]!r}"
             logger.info(self.last_action)
             return True
+        hwnd = self._open_peer(peer, tag="open_and_send")
+        if not hwnd:
+            return False
+        # 3) 输入框 → 粘贴 → 回车
+        return self.send_text(text, hwnd=hwnd)
+
+    def open_and_send_files(
+        self,
+        peer: str,
+        paths: Iterable[str],
+        *,
+        text: str = "",
+    ) -> bool:
+        """定位到会话，再发本地附件（图片/文件）。"""
+        files = [str(p) for p in paths if str(p)]
+        if self.dry_run:
+            self.last_action = (
+                f"[dry-run] open_and_send_files peer={peer} "
+                f"files={files[:3]}{'…' if len(files) > 3 else ''} text={text[:20]!r}"
+            )
+            logger.info(self.last_action)
+            return True
+        if not files:
+            self.last_action = "open_and_send_files: 没有附件"
+            return False
+        hwnd = self._open_peer(peer, tag="open_and_send_files")
+        if not hwnd:
+            return False
+        return self.send_files(files, text=text, hwnd=hwnd)
+
+    def send_files(self, paths: Iterable[str], *, text: str = "", hwnd: int = 0) -> bool:
+        """往当前打开的会话发本地附件。
+
+        QQ 输入框对 `CF_HDROP` 的处理和资源管理器一致：图片直接变成待发送的
+        图片（先本地预览、后台上传），其它文件变成待上传的附件。所以这里不需要
+        任何进程内注入，只要把文件放进剪贴板再按一次粘贴键——和 `send_text`
+        走的是同一条路，区别只在剪贴板里放的格式。
+
+        顺序不能反：剪贴板一次只装得下一样东西，所以先粘文字、再粘文件。
+        粘完要等 `attach_delay`，让客户端把附件挂到输入框；按早了只把文字
+        发出去，附件被静默丢掉（客户端不报错，也就没有任何信号能提示你）。
+        """
+        files = [str(p) for p in paths if str(p)]
+        if not files:
+            return False
+        if self.dry_run:
+            self.last_action = f"[dry-run] send_files {len(files)} 个: {files[:3]}"
+            logger.info(self.last_action)
+            return True
+        hwnd = hwnd or self.detect().hwnd
+        left, top, right, bottom = _W32.rect(hwnd)
+        if not right:
+            self.last_action = "send_files: 拿不到窗口位置"
+            return False
+        _W32.click(
+            left + int((right - left) * self.input_xy[0]),
+            top + int((bottom - top) * self.input_xy[1]),
+        )
+        mods, vk = parse_hotkey(self.paste_hotkey)
+        if text:
+            if not _W32.set_clipboard(text):
+                self.last_action = "send_files: 剪贴板写入失败（文本）"
+                return False
+            _W32.chord([*mods, vk])
+            time.sleep(0.15)
+        if not _W32.set_clipboard_files(files):
+            self.last_action = "send_files: 剪贴板写入失败（文件）"
+            return False
+        _W32.chord([*mods, vk])
+        time.sleep(self.attach_delay)
+        self._press_send()
+        self.last_action = (
+            f"send_files: {len(files)} 个附件" + (f" + {len(text)} 字" if text else "")
+        )
+        return True
+
+    # ---- 内部 ----
+    def _open_peer(self, peer: str, *, tag: str) -> int:
+        """点搜索框 → 敲会话名 → 点第一条。成功返回窗口句柄，失败返回 0。"""
         info = self.detect()
         if not info.running or not info.hwnd:
-            self.last_action = "open_and_send: 客户端不在线或没有窗口"
-            return False
+            self.last_action = f"{tag}: 客户端不在线或没有窗口"
+            return 0
         if not _W32.focus(info.hwnd):
-            self.last_action = "open_and_send: 没能拿到前台焦点（放弃，不往未知窗口里打字）"
-            return False
+            self.last_action = f"{tag}: 没能拿到前台焦点（放弃，不往未知窗口里打字）"
+            return 0
         left, top, right, bottom = _W32.rect(info.hwnd)
         if not right:
-            self.last_action = "open_and_send: 拿不到窗口位置"
-            return False
+            self.last_action = f"{tag}: 拿不到窗口位置"
+            return 0
         # 1) 会话列表顶部的搜索框
         _W32.click(left + 150, top + 65)
         self._type(str(peer))
@@ -555,10 +697,9 @@ class ClientHost:
         # 2) 搜索结果第一条（联系人区，固定出现在搜索框正下方）
         _W32.click(left + 210, top + 156)
         time.sleep(self.open_delay + 0.4)  # 等会话加载
-        # 3) 输入框 → 粘贴 → 回车
-        return self.send_text(text, hwnd=info.hwnd)
+        return info.hwnd
 
-    # ---- 内部 ----
+
     def _type(self, text: str) -> None:
         if not _W32.set_clipboard(text):
             return
@@ -662,13 +803,34 @@ class ClientHostAdapter(LinkAdapter):
     async def call_api(self, action: str, params: dict[str, Any] | None = None) -> Any:
         params = dict(params or {})
         if action in ("send_msg", "send_message", "send_private_msg", "send_group_msg"):
-            text = plain_text_of(params.get("message"))
-            if not text:
-                raise api_error(action, 1404, "客户端通道只支持纯文本，请换通道发送")
+            try:
+                parsed = el.parse_message(params.get("message"))
+            except el.MessageError as exc:
+                raise api_error(action, 1400, str(exc)) from None
+            files, remote = el.split_attachments(parsed)
+            if remote:
+                kinds = "、".join(sorted({e.kind for e in remote}))
+                raise api_error(
+                    action, 1404,
+                    f"{kinds} 段只有地址没有本地文件：剪贴板只能粘本机文件，请先下载到磁盘",
+                )
+            # 有附件时文字部分要剔掉 [图片] 这类占位符
+            text = (
+                "".join(e.text for e in parsed if e.kind == "text").strip()
+                if files
+                else el.plain_text(parsed)
+            )
+            if not text and not files:
+                raise api_error(action, 1404, "消息没有可发的内容")
             peer = params.get("group_id") or params.get("user_id")
             if not peer:
                 raise api_error(action, 1404, "缺少 group_id/user_id")
-            ok = await asyncio.to_thread(self.host.open_and_send, str(peer), text)
+            if files:
+                ok = await asyncio.to_thread(
+                    self.host.open_and_send_files, str(peer), files, text=text
+                )
+            else:
+                ok = await asyncio.to_thread(self.host.open_and_send, str(peer), text)
             if not ok:
                 raise api_error(action, -1, f"客户端操作失败: {self.host.last_action}")
             return {"message_id": 0, "via": "client-host"}

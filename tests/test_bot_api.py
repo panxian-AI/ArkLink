@@ -134,12 +134,22 @@ def test_send_single_and_multi(server):
     assert status == 200 and data["count"] == 2 and data["lines"] == 2
 
 
-def test_send_rejects_unsupported_segment_with_reason(server):
-    _srv, url, _bus = server
-    status, data = _req(url, "/api/v1/send", method="POST",
-                        payload={"to": "测试对象", "message": [{"type": "image", "data": {"file": "a.png"}}]})
+def test_send_rejects_unsupported_segment_with_reason(service, isolated):
+    """UI 通道发不了真 @：要回 1404 + 缺什么，而不是发出去一段「@名字」文字。
+
+    这里让引擎自称 `host`（能力矩阵按通道名查表），但不真操作界面。
+    """
+    service.engine = _HostNamedEngine()
+    bus = MessageBus()
+    srv = ApiServer(service, bus, port=0, token=TOKEN, state_file=False)
+    url = srv.start().rstrip("/")
+    try:
+        status, data = _req(url, "/api/v1/send", method="POST",
+                            payload={"to": "测试对象", "message": [{"type": "at", "data": {"qq": "1"}}]})
+    finally:
+        srv.stop()
     assert status == 400 and data["code"] == 1404
-    assert data["need"] and ("图片" in data["msg"] or "图片" in data["need"])
+    assert data["need"] and "真 @" in data["msg"]
 
 
 def test_send_rejects_outsider(server):
@@ -200,9 +210,17 @@ def test_capabilities_reports_missing_with_need(server):
     _srv, url, _bus = server
     status, data = _req(url, "/api/v1/capabilities")
     assert status == 200 and "send.text" in data["ok"]
-    assert "image" in data["missing"]
-    image = next(i for i in data["items"] if i["key"] == "image")
-    assert image["need"]
+    # 演练通道不真发，验证的是接口形状，所以什么都算走得通
+    assert data["missing"] == []
+
+
+def test_caps_on_ui_channel_are_honest():
+    """UI 通道的真实能力：附件能发（剪贴板粘贴），真 @/撤回/历史不行。"""
+    data = capabilities("host")
+    assert "image" in data["ok"] and "file" in data["ok"]
+    assert "at" in data["missing"] and "recall" in data["missing"]
+    at = next(i for i in data["items"] if i["key"] == "at")
+    assert at["need"]
 
 
 def test_self_friends_groups(server, isolated):
@@ -319,10 +337,16 @@ def test_load_bot_reads_module_bot(tmp_path):
 
 
 def test_caps_have_no_green_lies():
-    """现在没有任何通道能发图片/撤回，表里就不能写 true。"""
+    """凡写 true 的都要有真实实现路径；剪贴板够不到的能力必须留在 missing。"""
     data = capabilities("host")
-    assert "image" in data["missing"] and "recall" in data["missing"]
+    assert "recall" in data["missing"] and "history" in data["missing"]
     assert "send.text" in data["ok"]
+
+
+class _HostNamedEngine(DryRunEngine):
+    """自称 `host` 的演练引擎：让能力矩阵按 UI 通道查表，但不碰真实界面。"""
+
+    name = "host"
 
 
 class _FakeClient:
@@ -345,3 +369,87 @@ class _FakeClient:
 
     def stream(self, since=0, **kw):
         return iter(())
+
+
+# ---------------------------------------------------------------- 附件
+
+def test_attachment_must_be_local_file(tmp_path):
+    """剪贴板只能粘本机文件：地址、缺字段、文件不存在都要在入口拦住。"""
+    from arklink.api import attachment_problem
+
+    real = tmp_path / "a.png"
+    real.write_bytes(b"\x89PNG")
+    assert attachment_problem([{"type": "image", "data": {"file": str(real)}}]) is None
+
+    kind, why = attachment_problem([{"type": "image", "data": {"url": "https://x/a.png"}}])
+    assert kind == "image" and "地址" in why
+
+    kind, why = attachment_problem([{"type": "file", "data": {}}])
+    assert kind == "file" and "缺少 file" in why
+
+    kind, why = attachment_problem([{"type": "file", "data": {"file": str(tmp_path / "nope.pdf")}}])
+    assert kind == "file" and "找不到" in why
+
+
+def test_send_accepts_local_attachment_on_ui_channel(service, tmp_path):
+    """UI 通道带本地图片应该被放行（不再一律 1404）。"""
+    service.engine = _HostNamedEngine()
+    real = tmp_path / "a.png"
+    real.write_bytes(b"\x89PNG")
+    bus = MessageBus()
+    srv = ApiServer(service, bus, port=0, token=TOKEN, state_file=False)
+    url = srv.start().rstrip("/")
+    try:
+        status, data = _req(url, "/api/v1/send", method="POST", payload={
+            "to": "测试对象",
+            "message": [
+                {"type": "text", "data": {"text": "看图"}},
+                {"type": "image", "data": {"file": str(real)}},
+            ],
+        })
+    finally:
+        srv.stop()
+    assert status == 200 and data["ok"] is True
+    assert data["items"][0]["text"] == "看图"
+
+
+# ---------------------------------------------------------------- 附件
+
+def test_attachment_must_be_local_file(tmp_path):
+    """剪贴板只能粘本机文件：地址、缺字段、文件不存在都要在入口拦住。"""
+    from arklink.api import attachment_problem
+
+    real = tmp_path / "a.png"
+    real.write_bytes(b"\x89PNG")
+    assert attachment_problem([{"type": "image", "data": {"file": str(real)}}]) is None
+
+    kind, why = attachment_problem([{"type": "image", "data": {"url": "https://x/a.png"}}])
+    assert kind == "image" and "地址" in why
+
+    kind, why = attachment_problem([{"type": "file", "data": {}}])
+    assert kind == "file" and "缺少 file" in why
+
+    kind, why = attachment_problem([{"type": "file", "data": {"file": str(tmp_path / "nope.pdf")}}])
+    assert kind == "file" and "找不到" in why
+
+
+def test_send_accepts_local_attachment_on_ui_channel(service, tmp_path):
+    """UI 通道带本地图片应该被放行（不再一律 1404）。"""
+    service.engine = _HostNamedEngine()
+    real = tmp_path / "a.png"
+    real.write_bytes(b"\x89PNG")
+    bus = MessageBus()
+    srv = ApiServer(service, bus, port=0, token=TOKEN, state_file=False)
+    url = srv.start().rstrip("/")
+    try:
+        status, data = _req(url, "/api/v1/send", method="POST", payload={
+            "to": "测试对象",
+            "message": [
+                {"type": "text", "data": {"text": "看图"}},
+                {"type": "image", "data": {"file": str(real)}},
+            ],
+        })
+    finally:
+        srv.stop()
+    assert status == 200 and data["ok"] is True
+    assert data["items"][0]["text"] == "看图"

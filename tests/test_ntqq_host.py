@@ -67,6 +67,7 @@ def test_dry_run_does_not_touch_keyboard():
 class FakeHost:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.file_calls: list[tuple[str, list[str], str]] = []
         self.last_action = ""
         self.fail = False
 
@@ -76,6 +77,11 @@ class FakeHost:
     def open_and_send(self, peer: str, text: str) -> bool:
         self.calls.append((peer, text))
         self.last_action = f"sent {peer}"
+        return not self.fail
+
+    def open_and_send_files(self, peer: str, paths, text: str = "") -> bool:
+        self.file_calls.append((peer, list(paths), text))
+        self.last_action = f"sent {peer} +{len(list(paths))}"
         return not self.fail
 
 
@@ -107,11 +113,11 @@ def test_adapter_rejects_non_text_and_unknown_action():
         adapter = H.ClientHostAdapter(host=fake)  # type: ignore[arg-type]
         adapter.info = fake.detect()
 
-        with pytest.raises(Exception) as ei:
-            await adapter.call_api("send_group_msg", {
-                "group_id": 1, "message": [{"type": "image", "data": {"file": "a.png"}}],
-            })
-        assert getattr(ei.value, "retcode", None) == 1404
+        # 附件：走 open_and_send_files，不再一律拒绝
+        await adapter.call_api("send_group_msg", {
+            "group_id": 1, "message": [{"type": "image", "data": {"file": "a.png"}}],
+        })
+        assert fake.file_calls and fake.file_calls[-1][1] == ["a.png"]
 
         with pytest.raises(Exception) as ei2:
             await adapter.call_api("set_group_kick", {"group_id": 1, "user_id": 2})
@@ -144,3 +150,72 @@ def test_adapter_receive_is_off():
     async def run():
         assert await adapter.send_reply(object(), "x") is False
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------- 剪贴板附件
+
+def test_build_dropfiles_layout():
+    """CF_HDROP 的字节布局错了，接收方会静默忽略这次粘贴。"""
+    import struct
+
+    data = H.build_dropfiles(["C:/a.png", "D:/b.pdf"])
+    assert struct.unpack("<I", data[:4])[0] == H.DROPFILES_SIZE
+    # fWide 必须是 1：为 0 时对方按 ANSI 解析，中文路径全乱
+    assert struct.unpack("<I", data[16:20])[0] == 1
+    # 列表以双 null 收尾
+    assert data.endswith(b"\x00\x00")
+    assert H.parse_dropfiles(data) == ["C:/a.png", "D:/b.pdf"]
+
+
+def test_build_dropfiles_handles_cjk_and_empty():
+    data = H.build_dropfiles(["D:/报告 2026.pdf"])
+    assert H.parse_dropfiles(data) == ["D:/报告 2026.pdf"]
+    assert H.build_dropfiles([]) == b""
+    assert H.build_dropfiles(["", ""]) == b""
+
+
+def test_w32_set_clipboard_files_uses_hdrop(monkeypatch):
+    seen = {}
+
+    def fake(fmt, data):
+        seen["fmt"], seen["data"] = fmt, data
+        return True
+
+    monkeypatch.setattr(H._W32, "_set_raw", fake)
+    assert H._W32.set_clipboard_files(["C:/a.png"]) is True
+    assert seen["fmt"] == H.CF_HDROP
+    assert H.parse_dropfiles(seen["data"]) == ["C:/a.png"]
+
+
+def test_dry_run_send_files():
+    client = H.ClientHost(dry_run=True)
+    assert client.send_files(["C:/a.png"], text="看图") is True
+    assert "1 个" in client.last_action
+    assert client.open_and_send_files("123", ["C:/a.png", "C:/b.pdf"]) is True
+    assert "peer=123" in client.last_action
+
+
+def test_send_files_pastes_text_before_files(monkeypatch):
+    """剪贴板一次只装得下一样，所以顺序必须是先文本后文件。"""
+    client = H.ClientHost(dry_run=False, attach_delay=0)
+    calls: list[tuple] = []
+    monkeypatch.setattr(H._W32, "rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(H._W32, "click", lambda x, y: calls.append(("click", x, y)))
+    monkeypatch.setattr(H._W32, "chord", lambda keys: calls.append(("chord", tuple(keys))))
+    monkeypatch.setattr(H._W32, "set_clipboard", lambda t: calls.append(("text", t)) or True)
+    monkeypatch.setattr(
+        H._W32, "set_clipboard_files", lambda p: calls.append(("files", list(p))) or True
+    )
+    assert client.send_files(["C:/a.png"], text="看图", hwnd=1) is True
+    kinds = [c[0] for c in calls]
+    assert kinds.index("text") < kinds.index("files")
+    assert calls[-1] == ("chord", (H.VK_RETURN,))
+
+
+def test_send_files_reports_clipboard_failure(monkeypatch):
+    client = H.ClientHost(dry_run=False, attach_delay=0)
+    monkeypatch.setattr(H._W32, "rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(H._W32, "click", lambda x, y: None)
+    monkeypatch.setattr(H._W32, "set_clipboard_files", lambda p: False)
+    assert client.send_files(["C:/a.png"], hwnd=1) is False
+    assert "剪贴板写入失败" in client.last_action
