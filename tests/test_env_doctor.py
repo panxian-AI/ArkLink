@@ -106,3 +106,12 @@ def test_findings_serializable():
     report["guest"]["QQ_PROC"] = "0"
     data = [f.__dict__ for f in D.run_checks(report)]
     assert json.dumps(data, ensure_ascii=False)
+
+
+def test_qq_log_permission_denied_is_a_known_trap():
+    """root 跑 QQ + /tmp/qq.log 属主不对 = QQ 起不来（真机踩过）。"""
+    report = _healthy()
+    report["guest"]["QQLOG"] = "line 22: /tmp/qq.log: Permission denied"
+    problems = D.run_checks(report)
+    hit = [f for f in problems if f.check == "qq_log_perm"][0]
+    assert "restart" in " ".join(hit.fix)

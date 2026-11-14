@@ -82,11 +82,12 @@ def collect_report(mgr: "EnvManager", *, password: str) -> dict[str, Any]:
         "echo DISK=$(df -h / | awk 'NR==2{print $5}' | tr -d '%'); "
         "echo SVC_BOT=$(systemctl is-active arklink.service 2>/dev/null); "
         "echo SVC_API=$(systemctl is-active arklink-api.service 2>/dev/null); "
-        "echo QQ_PROC=$(pgrep -c -f '/opt/QQ/qq|/opt/qq/qq' 2>/dev/null || echo 0); "
+        # 用 -x 精确匹配可执行名：-f 会匹配到命令行里带 /opt/QQ/qq 的 shell 自己
+        "echo QQ_PROC=$( (pgrep -x qq; pgrep -f '^/opt/QQ/qq') 2>/dev/null | sort -u | wc -l); "
         "export DISPLAY=:99; "
         "echo QQ_WIN=$(xdotool search --name '^QQ$' 2>/dev/null | wc -l); "
-        "echo CRASHES=$(ls /home/arklink/.config/QQ/crash_files 2>/dev/null | wc -l); "
-        "echo LOGIN_BAK=$([ -f /home/arklink/qq-login.tgz ] && echo yes || echo no); "
+        "echo CRASHES=$(ls $HOME/.config/QQ/crash_files 2>/dev/null | wc -l); "
+        "echo LOGIN_BAK=$([ -f $HOME/qq-login.tgz ] && echo yes || echo no); "
         "echo QQLOG=$(tail -c 400 /tmp/qq.log 2>/dev/null | tr '\\n' ' ' | tail -c 200)"
     )
     try:
@@ -189,12 +190,19 @@ def run_checks(report: dict[str, Any]) -> list[Finding]:
     if crashes > 0:
         findings.append(Finding("qq_crash_files", False, f"crash_files 里有 {crashes} 个文件",
                                 "QQ 之前崩溃过；强杀进程会这样。崩溃不丢登录态的前提是已备份登录态",
-                                ["tar czf /home/arklink/qq-login.tgz -C /home/arklink .config/QQ"]))
+                                ["tar czf ~/qq-login.tgz -C ~ .config/QQ"]))
+
+    qqlog = str(guest.get("QQLOG") or "")
+    if "Permission denied" in qqlog:
+        findings.append(Finding("qq_log_perm", False, "QQ 启动日志写不进去（Permission denied）",
+                                "start.sh 以 root 跑 QQ，而 /tmp/qq.log 属主是别的用户——"
+                                "QQ 会被重定向拦住直接不起来；新版 start.sh 用登录用户跑 QQ 并自动换日志名",
+                                ["sudo systemctl restart arklink.service"]))
 
     if guest.get("LOGIN_BAK") != "yes":
         findings.append(Finding("login_backup", False, "还没备份 QQ 登录态",
                                 "登录成功后立刻备份：之后 QQ 崩溃重启可以免扫码恢复",
-                                ["tar czf /home/arklink/qq-login.tgz -C /home/arklink .config/QQ"]))
+                                ["tar czf ~/qq-login.tgz -C ~ .config/QQ"]))
 
     if ports.get("webui") != "open":
         findings.append(Finding("port_webui", False, f"WebUI 端口 {ports.get('webui')}",

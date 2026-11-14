@@ -49,7 +49,7 @@ log "安装基础依赖（虚拟屏幕 / 窗口管理器 / 按键注入 / 中文
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-  xvfb openbox xdotool x11-utils \
+  xvfb openbox xdotool x11-utils scrot \
   fonts-wqy-microhei fonts-wqy-zenhei fontconfig \
   libgbm1 "${AUDIO_PKG}" libnss3 libxss1 libxtst6 libatk-bridge2.0-0 libatk1.0-0 \
   libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 \
@@ -115,9 +115,17 @@ cat > /opt/arklink/start.sh <<EOF
 set -u
 export DISPLAY=:${DISPLAY_NUM}
 export LANG=C.UTF-8
+# QQ 必须以**登录用户**身份跑：root 没有 ~/.config/QQ，起来就是扫码页，
+# 而且 /tmp 里的日志文件属主不对会直接 Permission denied 把 QQ 拦在门外
+QQ_USER="${QQ_USER:-$(id -un)}"
 
 # 只看"活不活着"，不看"进程在不在"——Xvfb 僵死（进程在但屏幕黑）是最常见的坑
 display_ok() { xdpyinfo -display :${DISPLAY_NUM} >/dev/null 2>&1; }
+
+qq_alive() {
+  # 用 pgrep -x 精确匹配可执行名，避免匹配到命令行里带这个字符串的 shell 自己
+  pgrep -x qq >/dev/null 2>&1 || pgrep -f "^/opt/QQ/qq" >/dev/null 2>&1
+}
 
 heal() {
   # 1) Xvfb：健康检查，坏了先杀干净再起新的（pgrep 命中不等于能用）
@@ -129,10 +137,19 @@ heal() {
   # 2) openbox 不能省：没有 WM，windowactivate 不会生效，窗口也没有正常尺寸
   pgrep -x openbox >/dev/null || { openbox >/dev/null 2>&1 & sleep 1; }
   # 3) QQ：进程死了才重启（容器里 Chromium 沙箱起不来，必须 --no-sandbox）
-  if ! pgrep -f "/opt/QQ/qq|/opt/qq/qq" >/dev/null; then
+  if ! qq_alive; then
     QQ_BIN=\$(command -v qq || echo /opt/QQ/qq)
-    [ -x "\$QQ_BIN" ] && setsid "\$QQ_BIN" --no-sandbox >/tmp/qq.log 2>&1 &
-    sleep 8
+    LOG=/tmp/qq.log
+    # 上一个 root 会话留下的日志属主不对时换个名字，别让重定向把它拦死
+    [ -e "\$LOG" ] && [ ! -w "\$LOG" ] && LOG=/tmp/qq-\$(id -u).log
+    if [ -x "\$QQ_BIN" ]; then
+      if [ "\$(id -u)" = "0" ] && id "\$QQ_USER" >/dev/null 2>&1; then
+        runuser -u "\$QQ_USER" -- setsid "\$QQ_BIN" --no-sandbox >"\$LOG" 2>&1 &
+      else
+        setsid "\$QQ_BIN" --no-sandbox >"\$LOG" 2>&1 &
+      fi
+      sleep 8
+    fi
   fi
 }
 
