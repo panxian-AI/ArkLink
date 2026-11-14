@@ -442,3 +442,243 @@ def test_cli_destroy_without_yes_refuses(capsys):
     code = main(["env", "destroy", "--dry-run"])
     assert code == 1
     assert "--yes" in capsys.readouterr().err
+
+
+def test_destroy_powers_off_running_vm_first(monkeypatch):
+    """运行中的机器是锁定的：不先关机，unregistervm 必然报
+    VBOX_E_INVALID_OBJECT_STATE（真机第一次写卸载就翻在这）。"""
+    runner = FakeRunner({
+        "list vms": '"arklink" {2b3c4d5e-1111-2222-3333-444455556666}\n',
+    })
+    box = VBox(r"C:/VBox/VBoxManage.exe", runner=runner)
+    states = ["running", "running", "poweroff"]
+    monkeypatch.setattr(box, "status", lambda name: states.pop(0) if states else "poweroff")
+    box.destroy("arklink")
+    joins = [" ".join(c[1:]) for c in runner.calls]
+    assert any("controlvm arklink acpipowerbutton" in j for j in joins)
+    assert joins[-1].startswith("unregistervm arklink --delete")
+
+
+def test_destroy_powers_off_running_vm_first(monkeypatch):
+    """运行中的机器是锁定的：不先关机，unregistervm 必然报
+    VBOX_E_INVALID_OBJECT_STATE（真机第一次写卸载就翻在这）。"""
+    runner = FakeRunner({
+        "list vms": '"arklink" {2b3c4d5e-1111-2222-3333-444455556666}\n',
+    })
+    box = VBox(r"C:\VBox\VBoxManage.exe", runner=runner)
+    states = ["running", "running", "poweroff"]
+    monkeypatch.setattr(box, "status", lambda name: states.pop(0) if states else "poweroff")
+    box.destroy("arklink")
+    joins = [" ".join(c[1:]) for c in runner.calls]
+    assert any("controlvm arklink acpipowerbutton" in j for j in joins)
+    assert joins[-1].startswith("unregistervm arklink --delete")
+
+
+def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
+    """断点续传可能混入坏数据：校验不过要**整包重下**，不是直接报死。"""
+    payload = b"correct-bytes"
+
+    class Resp:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self, bad: bool) -> None:
+            self.bad = bad
+            self.sent = False
+
+        def read(self, n=-1):
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"corrupted!!" if self.bad else payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    ref = IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload))
+    calls = {"n": 0}
+
+    def opener(url, timeout):
+        calls["n"] += 1
+        return Resp(calls["n"] == 1)
+
+    dest = tmp_path / "u.iso"
+    download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
+    assert dest.read_bytes() == payload
+    assert calls["n"] == 2, "第一轮校验失败后应该整包重下"
+
+
+def test_resolve_qq_package_parses_official_cdn():
+    """官网直链在 rainbow 配置 JS 里：解析失败等于部署断粮，必须测。"""
+    from arklink.env import LINUXQQ_CONFIG_URL, resolve_qq_package
+
+    cfg = (';(function(){var params= {"version":"3.2.35",'
+           '"x64DownloadUrl":{"deb":"https://qqdl.gtimg.cn/qqfile/QQNTV2/9.9.37/'
+           'release/816b3c79/QQ_3.2.35_261103_amd64_01.deb",'
+           '"appimage":"https://qqdl.gtimg.cn/x.AppImage",'
+           '"rpm":"https://qqdl.gtimg.cn/x.rpm"}};'
+           'typeof callback_1888_config1 === "function" && callback_1888_config1(params)})()')
+
+    class FakeOpener:
+        def open(self, url, timeout=None):
+            assert url == LINUXQQ_CONFIG_URL
+
+            class Resp:
+                def read(self, n=-1):
+                    return cfg.encode()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            return Resp()
+
+    ref = resolve_qq_package(opener=FakeOpener())
+    assert ref.name == "QQ_3.2.35_261103_amd64_01.deb"
+    assert ref.url.startswith("https://qqdl.gtimg.cn/")
+    assert ref.sha256 == "", "官方 CDN 没公布 sha256，不该瞎填"
+
+
+def test_download_iso_retries_from_scratch_after_checksum_mismatch(tmp_path):
+    """断点续传可能混入坏数据：校验不过要**整包重下**，不是直接报死。"""
+    payload = b"correct-bytes"
+
+    class Resp:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __init__(self, bad: bool) -> None:
+            self.bad = bad
+            self.sent = False
+
+        def read(self, n=-1):
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"corrupted!!" if self.bad else payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    ref = IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload))
+    calls = {"n": 0}
+
+    def opener(url, timeout):
+        calls["n"] += 1
+        return Resp(calls["n"] == 1)
+
+    dest = tmp_path / "u.iso"
+    download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
+    assert dest.read_bytes() == payload
+    assert calls["n"] == 2, "第一轮校验失败后应该整包重下"
+
+
+def test_resolve_qq_package_parses_official_cdn():
+    """官网直链在 rainbow 配置 JS 里：解析失败等于部署断粮，必须测。"""
+    from arklink.env import LINUXQQ_CONFIG_URL, resolve_qq_package
+
+    cfg = (';(function(){var params= {"version":"3.2.35",'
+           '"x64DownloadUrl":{"deb":"https://qqdl.gtimg.cn/qqfile/QQNTV2/9.9.37/'
+           'release/816b3c79/QQ_3.2.35_261103_amd64_01.deb",'
+           '"appimage":"https://qqdl.gtimg.cn/x.AppImage",'
+           '"rpm":"https://qqdl.gtimg.cn/x.rpm"}};'
+           'typeof callback_1888_config1 === "function" && callback_1888_config1(params)})()')
+
+    class FakeOpener:
+        def open(self, url, timeout=None):
+            assert url == LINUXQQ_CONFIG_URL
+
+            class Resp:
+                def read(self, n=-1):
+                    return cfg.encode()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            return Resp()
+
+    ref = resolve_qq_package(opener=FakeOpener())
+    assert ref.name == "QQ_3.2.35_261103_amd64_01.deb"
+    assert ref.url.startswith("https://qqdl.gtimg.cn/")
+    assert ref.sha256 == "", "官方 CDN 没公布 sha256，不该瞎填"
+
+
+def test_download_iso_keeps_progress_when_server_ignores_range(tmp_path):
+    """加速镜像站（ghproxy 类）不支持 Range，回 200 全量流。
+
+    之前直接从头写：每次中断都清零，177MB 永远下不完（真机踩过）。
+    现在要把已下过的字节跳过，往 .part 后面续。
+    """
+    payload = b"0123456789abcdef" * 2  # 32 字节
+
+    class Resp:
+        def __init__(self, offset: int) -> None:
+            self.data = payload[offset:]  # 模拟 200 全量流
+            self.headers = {"Content-Length": str(len(self.data))}
+
+        def read(self, n=-1):
+            out, self.data = self.data[:n], self.data[n:]
+            return out
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    ref = IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload))
+    dest = tmp_path / "u.iso"
+    part = dest.with_suffix(".iso.part")
+    part.write_bytes(payload[:10])  # 假设已下 10 字节
+
+    def opener(url, timeout):
+        # 请求带了 Range 头，但服务器忽略它：返回 200 + 完整流
+        return Resp(0)
+
+    download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
+    assert dest.read_bytes() == payload
+
+
+def test_download_iso_keeps_progress_when_server_ignores_range(tmp_path):
+    """加速镜像站（ghproxy 类）不支持 Range，回 200 全量流。
+
+    之前直接从头写：每次中断都清零，177MB 永远下不完（真机踩过）。
+    现在要把已下过的字节跳过，往 .part 后面续。
+    """
+    payload = b"0123456789abcdef" * 2  # 32 字节
+
+    class Resp:
+        def __init__(self, offset: int) -> None:
+            self.data = payload[offset:]  # 模拟 200 全量流
+            self.headers = {"Content-Length": str(len(self.data))}
+
+        def read(self, n=-1):
+            out, self.data = self.data[:n], self.data[n:]
+            return out
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    ref = IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload))
+    dest = tmp_path / "u.iso"
+    part = dest.with_suffix(".iso.part")
+    part.write_bytes(payload[:10])  # 假设已下 10 字节
+
+    def opener(url, timeout):
+        # 请求带了 Range 头，但服务器忽略它：返回 200 + 完整流
+        return Resp(0)
+
+    download_iso(ref, str(dest), opener=opener, log=lambda *_: None)
+    assert dest.read_bytes() == payload

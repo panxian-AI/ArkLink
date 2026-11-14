@@ -1141,7 +1141,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_env.add_argument("--yes", action="store_true", help="destroy 确认（会删虚拟磁盘）")
     p_env.set_defaults(func=_env)
 
+    p_dep = sub.add_parser(
+        "deploy",
+        help="一键部署：不带地址=本机虚拟机；给 user@ip[:端口]=远程 Linux 服务器",
+    )
+    p_dep.add_argument("target", nargs="?", default="",
+                       help="部署地址，例如 root@1.2.3.4 或 root@1.2.3.4:2222；留空=本机虚拟机")
+    p_dep.add_argument("--host", "-H", default="", help="同 target（写在这里更直观）")
+    p_dep.add_argument("--source", default="", help="要部署的源码目录（远程模式默认当前目录）")
+    p_dep.add_argument("--remote-dir", default="/opt/ArkLink", help="远程安装目录")
+    p_dep.add_argument("--dry-run", action="store_true", help="只打印将执行的命令，不动手")
+    p_dep.set_defaults(func=_deploy)
+
     return parser
+
+
+def _deploy(args: argparse.Namespace) -> int:
+    from .deploy import Target, deploy_remote
+
+    raw = args.host or args.target or ""
+    target = Target(raw)
+    if target.is_local_vm:
+        print("[deploy] 落点：本机虚拟机（VirtualBox + Ubuntu + QQ，全自动）", flush=True)
+        # dry-run 只报计划：env setup 的 dry-run 会一路走到「等系统装好」，没有意义
+        argv = ["env", "plan"] if args.dry_run else ["env", "setup", "--source", args.source or "."]
+        return _deploy_local(argv)
+    print(f"[deploy] 落点：远程服务器 {raw}", flush=True)
+    return deploy_remote(
+        target,
+        source=args.source or ".",
+        remote_dir=args.remote_dir,
+        dry_run=args.dry_run,
+    )
+
+
+def _deploy_local(argv: list[str]) -> int:
+    """复用 env setup 的实现：再解析一次 argv 拿到 _env 那个入口。"""
+    args = build_parser().parse_args(argv)
+    return int(args.func(args))
 
 
 def _env(args: argparse.Namespace) -> int:
@@ -1149,9 +1186,12 @@ def _env(args: argparse.Namespace) -> int:
     import secrets
 
     from .env import (
+        QQ_PACKAGE,
         download_iso,
         find_local_iso,
+        qq_package_candidates,
         resolve_iso,
+        sha256_of,
         EnvManager,
     )
     from .env.vbox import VBoxError
@@ -1279,11 +1319,53 @@ def _env(args: argparse.Namespace) -> int:
         setup_script = os.path.join(source, "tools", "setup_guest.sh")
         if not os.path.isfile(setup_script):
             return fail(f"{source} 里没有 tools/setup_guest.sh，--source 指到仓库根目录再试")
+        # QQ 安装包：多源回退。① 官网 CDN（qqdl.gtimg.cn，国内直连，但部分
+        # 网络 403 热链保护）；② GitHub 直连/加速镜像（SHA256 校验）。
+        # 宿主机下好推给 guest：guest 自己 wget 177MB 太不可靠——真机踩过：
+        # 镜像失败只是 warn，QQ 被静默跳过，整条 setup 还报成功。
+        extra: list[str] = []
+        chosen = ""
+        pkgs = [
+            (os.path.join(plan.workdir or ".", r.name), r)
+            for r in qq_package_candidates()
+        ]
+        for path, pkg in pkgs:
+            if os.path.isfile(path) and (not pkg.sha256
+                                         or sha256_of(path) == pkg.sha256):
+                chosen = path
+                break
+        if chosen:
+            print(f"[env] QQ 安装包已有现成的：{chosen}")
+        else:
+            for path, pkg in pkgs:
+                print(f"[env] 下载 QQ 安装包：{pkg.url[:72]}…")
+                try:
+                    download_iso(pkg, path, attempts=4)
+                    chosen = path
+                    break
+                except RuntimeError as exc:
+                    print(f"[env] ⚠️ 这个源失败：{exc}；试下一个源…")
+            if not chosen:
+                print("[env] ⚠️ 所有源都没下到 QQ 包：会继续让 guest 自己下载"
+                      "（网络差可能装不上 QQ，setup 结尾会明确报失败）")
+        if chosen:
+            extra.append(chosen)
+
         print("[env] 推代码进虚拟机并安装 QQ/Xvfb（约 3–8 分钟）…")
         try:
-            mgr.push(source, password=password)
+            mgr.push(source, password=password, extra_files=extra)
         except VBoxError as exc:
             return fail(f"{exc}\n重跑同一条命令会接着来（幂等）")
+
+        # 收尾必须验货：QQ 没装上就明说，别让用户对着扫不出码的网页发呆
+        print("[env] 验证 guest 里的 QQ…")
+        if not mgr.guest_has_qq(password=password):
+            return fail(
+                "QQ 没有装上。排查：\n"
+                f"  1) arklink env doctor --password {password} --ai --key sk-xxx\n"
+                "  2) 看 guest 里 /var/log/arklink-setup.log 或 apt 的报错\n"
+                "  3) 网络不行就手动下 deb 后重跑本命令（包会自动复用）"
+            )
 
         print()
         print("[env] 完成。接下来：")
@@ -1459,6 +1541,13 @@ def _maybe_notice() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 部署/装机动辄十几分钟：输出被重定向到日志或经 bat 转发时不刷新，
+    # 用户会看到「窗口一片空白」。强制行缓冲，进度一行一行滚出来。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+        except Exception:
+            pass
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "cmd", "") not in ("version", "versions", "update"):

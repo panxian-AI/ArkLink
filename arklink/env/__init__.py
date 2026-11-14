@@ -63,6 +63,68 @@ class IsoRef:
         return tuple(int(x) for x in m.group(1).split(".")) if m else ()
 
 
+#: QQ Linux 安装包（GitHub 镜像，官方 CDN 对部分网络 403）。
+#: 只是**备选**：首选官网 CDN（resolve_qq_package，国内直连、不走代理）。
+#: 宿主机先下好再推给 guest：guest 的网络往往比宿主机差，
+#: 让 guest 自己 wget 177MB 十有八九卡死——真机就静默跳过过 QQ。
+QQ_PACKAGE = IsoRef(
+    name="QQ_3.2.32_260812_amd64_01.deb",
+    url="https://github.com/Rodert/qq-versions/releases/download/"
+        "qq-packages-20260813-1d08f1d4/QQ_3.2.32_260812_amd64_01.deb",
+    sha256="4409ec87f96675318ab4c456735741ec05513f8197733623f55c729579023353",
+)
+
+#: 官网 linuxqq 页面的 rainbow 配置（里面有各架构的官方下载直链）。
+LINUXQQ_CONFIG_URL = "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js"
+
+
+#: GitHub 直连在大陆网络基本靠运气：加速镜像站前缀列表，按序探测。
+#: 这些站本身也常换域名，所以列表要长、逐个试，谁活用谁。
+GITHUB_MIRROR_PREFIXES = (
+    "",
+    "https://ghproxy.net/",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+)
+
+
+def qq_package_candidates() -> list[IsoRef]:
+    """QQ 包的候选源，按优先级排：
+
+    ① 官网 CDN（qqdl.gtimg.cn，国内直连）——部分网络会被 403（热链保护），
+       解析/下载失败不致命，继续往下一个源走；
+    ②③ GitHub 镜像：直连 + 加速前缀，带官方 SHA256 校验。
+    """
+    out: list[IsoRef] = []
+    try:
+        out.append(resolve_qq_package())
+    except Exception:
+        pass
+    for prefix in GITHUB_MIRROR_PREFIXES:
+        ref = IsoRef(QQ_PACKAGE.name, prefix + QQ_PACKAGE.url, QQ_PACKAGE.sha256)
+        if ref.url not in {r.url for r in out}:
+            out.append(ref)
+    return out
+
+
+def resolve_qq_package(*, timeout: float = 30.0, opener=None) -> IsoRef:
+    """从官网 CDN 解析 Linux QQ 的 amd64 deb 直链。
+
+    官网 HTML 不带直链，直链在 rainbow 配置 JS 里；用 CDN 域名（cdn-go.cn /
+    qqdl.gtimg.cn），国内直连，**刻意绕过系统代理**——GitHub 挂了它也活着，
+    这是部署的多源兜底里最可靠的一条。
+    """
+    op = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with op.open(LINUXQQ_CONFIG_URL, timeout=timeout) as resp:
+        cfg = resp.read().decode("utf-8", "replace")
+    m = re.search(r'"x64DownloadUrl"\s*:\s*\{[^}]*?"deb"\s*:\s*"([^"]+)"', cfg)
+    if not m:
+        raise RuntimeError("官网配置里没解析到 x64 deb 直链（页面结构变了？）")
+    url = m.group(1)
+    name = url.rsplit("/", 1)[-1]
+    return IsoRef(name=name, url=url)  # 官方 CDN 没有公布 sha256，靠 HTTPS + 域名保真
+
+
 def resolve_iso(*, timeout: float = 20.0, opener=None) -> IsoRef:
     """从官方 SHA256SUMS 里找当前最新的 24.04 server ISO（同时拿到校验和）。"""
     open_fn = opener or urllib.request.urlopen
@@ -115,13 +177,22 @@ def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
         try:
             with open_fn(req, timeout=60) as resp:
                 resumed = getattr(resp, "status", 200) == 206
+                skip = 0
                 if have and not resumed:
-                    have = 0  # 服务器不支持续传，从头写
+                    # 服务器不支持 Range（ghproxy 这类加速站只回 200 全量）：
+                    # 不能从头写——那样每次重试都白费。改成把响应流里已下过的
+                    # 字节**跳过**再续写，进度照样累积（QQ 包下载实测踩过）。
+                    skip = have
                 total = int(resp.headers.get("Content-Length") or 0) + have
                 mode = "ab" if have else "wb"
                 done = have
                 last = 0.0
                 with open(tmp, mode) as fp:
+                    while skip:
+                        block = resp.read(min(1 << 20, skip))
+                        if not block:
+                            break  # 服务器给的比已下过的还少：数据不对劲，重试
+                        skip -= len(block)
                     while True:
                         block = resp.read(1 << 20)
                         if not block:
@@ -147,8 +218,11 @@ def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
             got = sha256_of(tmp)
             if got != iso.sha256:
                 os.unlink(tmp)
-                raise RuntimeError(f"ISO 校验失败：期望 {iso.sha256[:16]}… 实际 {got[:16]}…"
-                                   "（重下也没用，大概率镜像有问题）")
+                # 校验不过就**整包重下**：断点续传混入坏数据的概率远大于
+                # 镜像本身有问题（QQ 包就出现过「校验失败」直接报死的情况）。
+                last_error = (f"校验失败：期望 {iso.sha256[:16]}… 实际 {got[:16]}…")
+                log(f"  ⚠️ {last_error}；删掉重下（第 {attempt}/{attempts} 轮）")
+                continue
         os.replace(tmp, dest)
         return dest
 
@@ -407,8 +481,13 @@ class EnvManager:
             time.sleep(interval)
         return False
 
-    def push(self, source: str, *, password: str, script: str = SETUP_SCRIPT) -> str:
-        """把宿主仓库推进 guest 并执行自举脚本（guest 内会装 QQ/Xvfb/Arklink）。"""
+    def push(self, source: str, *, password: str, script: str = SETUP_SCRIPT,
+             extra_files: Sequence[str] = ()) -> str:
+        """把宿主仓库推进 guest 并执行自举脚本（guest 内会装 QQ/Xvfb/Arklink）。
+
+        extra_files：先于脚本推到 guest 的 /tmp（比如宿主机下好的 QQ deb，
+        guest 自己 wget 177MB 太不可靠）。
+        """
         if self.dry_run:
             return "dry-run"
         name = self.plan.name
@@ -424,9 +503,32 @@ class EnvManager:
         )
         cmds += copyto_commands(name, os.path.abspath(source), target,
                                 user=user, password=password)
+        for extra in extra_files:
+            if extra and os.path.isfile(extra):
+                cmds += [[
+                    "guestcontrol", name, "copyto", os.path.abspath(extra),
+                    f"/tmp/{os.path.basename(extra)}",
+                    "--username", user, "--password", password,
+                ]]
         cmds += guest_run_commands(
             name,
             f"sudo bash {target}/{script} --source {target}",
             user=user, password=password,
         )
         return "\n".join(self.require_box().apply(cmds, timeout=3600))
+
+    def guest_has_qq(self, *, password: str) -> bool:
+        """guest 里 QQ 到底装上没有——setup 结束前必须验，不能只报 warn。"""
+        if self.dry_run:
+            return True
+        cmds = guest_run_commands(
+            self.plan.name,
+            "command -v qq >/dev/null 2>&1 && echo QQ_OK || "
+            "test -x /opt/QQ/qq && echo QQ_OK || echo QQ_MISSING",
+            user=self.state.user, password=password,
+        )
+        try:
+            out = "\n".join(self.require_box().apply(cmds, timeout=120))
+        except VBoxError:
+            return False
+        return "QQ_OK" in out

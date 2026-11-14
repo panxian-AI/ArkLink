@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -226,8 +227,28 @@ class VBox:
     def destroy(self, name: str, *, delete_disks: bool = True) -> str:
         if not self.exists(name):
             return ""
+        out: list[str] = []
+        # 运行中的虚拟机是「锁定」状态，unregister 会直接报
+        # VBOX_E_INVALID_OBJECT_STATE（第一次写卸载功能时就翻在这）。
+        # 先发 ACPI 关机等它自己退，等不到再硬断电，最后才注销。
+        if self.status(name) not in ("poweroff", "aborted", "unknown"):
+            try:
+                self.stop(name)
+            except VBoxError:
+                pass
+            for _ in range(20):
+                if self.status(name) in ("poweroff", "aborted"):
+                    break
+                time.sleep(1)
+            if self.status(name) not in ("poweroff", "aborted"):
+                try:
+                    self.stop(name, force=True)
+                except VBoxError:
+                    pass
+                time.sleep(3)
         cmd = [VBM, "unregistervm", name] + (["--delete"] if delete_disks else [])
-        return "\n".join(self.apply([cmd], timeout=300))
+        out.extend(self.apply([cmd], timeout=300))
+        return "\n".join(out)
 
     def describe(self, name: str) -> dict[str, object]:
         state = self.status(name)

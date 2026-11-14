@@ -296,7 +296,13 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable --now arklink-api.service >/dev/null 2>&1 \
   || warn "systemd 不可用，请手动起：DISPLAY=:${DISPLAY_NUM} /opt/arklink-venv/bin/python -m arklink serve api --engine x11"
 
-# ---------------------------------------------------------------- 5. 自检
+# ---------------------------------------------------------------- 5. 收尾验货
+# QQ 没装上，后面全是白搭：直接非 0 退出，让上层 setup 报「失败」，
+# 而不是傻乎乎地说「完成」（真机就静默跳过过 QQ，用户对着网页发呆）
+command -v qq >/dev/null 2>&1 || [ -x /opt/QQ/qq ] \
+  || die "QQ 未安装成功：看上面 apt/wget 的报错；宿主机重跑 setup 会把 deb 推进来"
+
+# ---------------------------------------------------------------- 6. 自检
 sleep 2
 echo
 log "自检"
