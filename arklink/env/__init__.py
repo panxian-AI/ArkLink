@@ -89,33 +89,73 @@ def sha256_of(path: str, *, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print) -> str:
-    """下载并校验。校验和来自官方 SHA256SUMS，不是我们自己算的。"""
+def download_iso(iso: IsoRef, dest: str, *, opener=None, log=print,
+                 attempts: int = 12) -> str:
+    """下载并校验。校验和来自官方 SHA256SUMS，不是我们自己算的。
+
+    2.6~3.9GB 的下载在这个网络环境里**必然**会断（真机第一次就到 6% 超时）。
+    所以这里做两件之前没做的事：
+    * 断点续传：`.part` 留着，下次带 `Range` 接着下，而不是从 0 重来；
+    * 失败自动重试：断线/超时算正常事件，退避后继续，只有连续失败才报错。
+    """
     open_fn = opener or urllib.request.urlopen
     os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+
+    if os.path.isfile(dest) and iso.sha256 and sha256_of(dest) == iso.sha256:
+        log(f"  已有完整 ISO，跳过下载：{dest}")
+        return dest
+
     tmp = dest + ".part"
-    with open_fn(iso.url, timeout=60) as resp, open(tmp, "wb") as fp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        last = 0.0
-        while True:
-            block = resp.read(1 << 20)
-            if not block:
-                break
-            fp.write(block)
-            done += len(block)
-            now = time.monotonic()
-            if total and now - last > 1.0:
-                last = now
-                log(f"  下载 {done / 1024**2:.0f}/{total / 1024**2:.0f} MB "
-                    f"({done * 100 // total}%)")
-    if iso.sha256:
-        got = sha256_of(tmp)
-        if got != iso.sha256:
-            os.unlink(tmp)
-            raise RuntimeError(f"ISO 校验失败：期望 {iso.sha256[:16]}… 实际 {got[:16]}…")
-    os.replace(tmp, dest)
-    return dest
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        req = urllib.request.Request(iso.url)
+        if have:
+            req.add_header("Range", f"bytes={have}-")
+        try:
+            with open_fn(req, timeout=60) as resp:
+                resumed = getattr(resp, "status", 200) == 206
+                if have and not resumed:
+                    have = 0  # 服务器不支持续传，从头写
+                total = int(resp.headers.get("Content-Length") or 0) + have
+                mode = "ab" if have else "wb"
+                done = have
+                last = 0.0
+                with open(tmp, mode) as fp:
+                    while True:
+                        block = resp.read(1 << 20)
+                        if not block:
+                            break
+                        fp.write(block)
+                        done += len(block)
+                        now = time.monotonic()
+                        if total and now - last > 2.0:
+                            last = now
+                            log(f"  下载 {done / 1024**2:.0f}/{total / 1024**2:.0f} MB "
+                                f"({done * 100 // total}%)"
+                                + ("（续传）" if have else ""))
+        except Exception as exc:  # 断线、超时、5xx 都按「下次接着下」处理
+            last_error = str(exc)
+            size = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+            if attempt < attempts:
+                wait = min(30, 3 * attempt)
+                log(f"  下载中断（{exc}）；已落盘 {size / 1024**2:.0f}MB，"
+                    f"{wait}s 后第 {attempt + 1}/{attempts} 次续传…")
+                time.sleep(wait)
+            continue
+        if iso.sha256:
+            got = sha256_of(tmp)
+            if got != iso.sha256:
+                os.unlink(tmp)
+                raise RuntimeError(f"ISO 校验失败：期望 {iso.sha256[:16]}… 实际 {got[:16]}…"
+                                   "（重下也没用，大概率镜像有问题）")
+        os.replace(tmp, dest)
+        return dest
+
+    raise RuntimeError(
+        f"ISO 下载失败（已重试 {attempts} 次，最后错误：{last_error}）。\n"
+        f"半成品保留在 {tmp}，重跑同一条命令会接着下；也可以手动下载后 --iso 指定：{iso.url}"
+    )
 
 
 def find_local_iso(dirs: Sequence[str] | None = None) -> str:
@@ -335,6 +375,38 @@ class EnvManager:
                 return line
         return out.strip()
 
+    def wait_ready(self, *, password: str, timeout: float = 1500.0,
+                   interval: float = 15.0, log=print) -> bool:
+        """等无人值守安装跑完、guestcontrol 能进得去。
+
+        装系统是 10–20 分钟的异步过程，之前只能靠人盯着控制台 / 反复手跑
+        `env push` 猜。这里直接轮询 guestcontrol：能执行 echo 就说明装完了。
+        超时返回 False（不抛异常——上层要能给出「接下来怎么办」的提示）。
+        """
+        if self.dry_run:
+            return True
+        deadline = time.time() + timeout
+        last_note = 0.0
+        while time.time() < deadline:
+            try:
+                cmds = guest_run_commands(
+                    self.plan.name, "echo ARKLINK_READY",
+                    user=self.state.user, password=password,
+                )
+                out = "\n".join(self.require_box().apply(cmds, timeout=90))
+            except Exception:
+                out = ""
+            if "ARKLINK_READY" in out:
+                return True
+            now = time.time()
+            if now - last_note > 60:
+                last_note = now
+                left = int((deadline - now) / 60)
+                log(f"  还没装好（guestcontrol 进不去），剩约 {left} 分钟…"
+                    "装着的时候可以先干别的")
+            time.sleep(interval)
+        return False
+
     def push(self, source: str, *, password: str, script: str = SETUP_SCRIPT) -> str:
         """把宿主仓库推进 guest 并执行自举脚本（guest 内会装 QQ/Xvfb/Arklink）。"""
         if self.dry_run:
@@ -342,10 +414,12 @@ class EnvManager:
         name = self.plan.name
         target = "/opt/ArkLink"
         user = self.state.user
-        # /opt 归 root，先提权建目录并交给登录用户，copyto 才写得进去
+        # /opt 归 root，且上一次 setup 以 sudo 跑过的话里面还留着 root 的文件；
+        # 只 chown 目录本身不够——copyto 覆盖 egg-info 这类老文件会被拒，
+        # 必须递归把整棵树交给登录用户。
         cmds = guest_run_commands(
             name,
-            f"sudo mkdir -p {target} && sudo chown {user}:{user} {target}",
+            f"sudo mkdir -p {target} && sudo chown -R {user}:{user} {target}",
             user=user, password=password,
         )
         cmds += copyto_commands(name, os.path.abspath(source), target,

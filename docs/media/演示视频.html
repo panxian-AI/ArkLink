@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ArkLink · PPT 演示视频</title>
+<style>
+  :root{
+    --bg:#0B1020; --panel:#141A2E; --panel2:#1A2240;
+    --line:#2A3358; --txt:#EAF0FF; --sub:#9AA6C8;
+    --blue:#5B8DEF; --purple:#7F77DD; --teal:#2BC49A; --red:#E24B4A; --amber:#EF9F27;
+    --mono:'JetBrains Mono',Consolas,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#05070F;color:var(--txt);font-family:'HarmonyOS Sans SC','Microsoft YaHei',sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
+  #stage{width:1280px;height:720px;position:relative;background:var(--bg);border-radius:8px;overflow:hidden;
+         transform-origin:center center}
+  .slide{position:absolute;inset:0;padding:64px 80px;display:flex;flex-direction:column;
+         opacity:0;visibility:hidden;transition:opacity .5s ease}
+  .slide.on{opacity:1;visibility:visible}
+  .h1{font-size:44px;font-weight:600;letter-spacing:1px}
+  .h2{font-size:36px;font-weight:600}
+  .sub{color:var(--sub);font-size:20px;margin-top:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 26px}
+  .tagline{font-size:26px;color:var(--teal);margin-top:8px;font-weight:500}
+  /* 入场动效 */
+  .slide .rise{opacity:0;transform:translateY(24px);transition:all .6s ease}
+  .slide.on .rise{opacity:1;transform:none}
+  .slide.on .d1{transition-delay:.15s}
+  .slide.on .d2{transition-delay:.3s}
+  .slide.on .d3{transition-delay:.45s}
+  .slide.on .d4{transition-delay:.6s}
+  /* 进度与状态 */
+  #bar{position:absolute;left:0;top:0;height:5px;background:linear-gradient(90deg,#2BC49A,#7F77DD);z-index:60;transition:width .3s}
+  #hud{position:absolute;right:24px;top:20px;font-family:var(--mono);color:var(--sub);font-size:15px;z-index:60}
+  #hint{position:absolute;left:24px;top:20px;color:var(--sub);font-size:14px;z-index:60}
+  .glow{color:#8FA6FF}
+  .green{color:#4ADE80}.red{color:#F87171}.amber{color:#FBBF24}.teal{color:var(--teal)}
+  code,.mono{font-family:var(--mono)}
+  .kv{font-family:var(--mono);font-size:18px;color:var(--sub)}
+</style>
+</head>
+<body>
+<div id="stage">
+<div id="bar"></div>
+<div id="hint">空格 / 点击暂停 · 自动循环放映（PPT 演示视频 · 可录屏出 MP4）</div>
+<div id="hud">1 / 13</div>
+
+<!-- 1 封面 -->
+<section class="slide on">
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center">
+    <svg width="460" height="150" viewBox="0 0 460 150" style="margin-bottom:14px">
+      <circle cx="80" cy="75" r="34" fill="#141A2E" stroke="#2BC49A" stroke-width="2"/>
+      <circle cx="380" cy="75" r="34" fill="#141A2E" stroke="#7F77DD" stroke-width="2"/>
+      <path d="M114 75 H346" stroke="#2A3358" stroke-width="6" stroke-linecap="round"/>
+      <path d="M114 75 H346" stroke="#2BC49A" stroke-width="3" stroke-dasharray="8 10" stroke-linecap="round">
+        <animate attributeName="stroke-dashoffset" from="0" to="-36" dur="1.6s" repeatCount="indefinite"/>
+      </path>
+      <circle r="5" fill="#fff">
+        <animateMotion dur="2.4s" repeatCount="indefinite" path="M114 75 H346"/>
+      </circle>
+      <text x="80" y="82" text-anchor="middle" fill="#9AA6C8" font-size="18" font-family="Consolas">QQ</text>
+      <text x="380" y="82" text-anchor="middle" fill="#9AA6C8" font-size="16" font-family="Consolas">YOUR</text>
+    </svg>
+    <div class="h1 rise" style="font-size:72px">Ark<span style="color:var(--teal)">Link</span></div>
+    <div class="tagline rise d1">把 QQ 接进你的系统</div>
+    <div class="sub rise d2 mono" style="margin-top:22px">github.com/panxian-AI/ArkLink · 0.12.0</div>
+  </div>
+</section>
+
+<!-- 2 生态在收缩 -->
+<section class="slide">
+  <div class="h2 rise">原先那条路，正在<span class="red">变窄</span></div>
+  <div style="display:flex;gap:24px;margin-top:44px;flex:1;align-items:stretch">
+    <div class="card rise d1" style="flex:1;border-color:var(--red)"><div style="font-size:20px;color:var(--sub)">仓库说没就没</div>
+      <div style="font-size:24px;margin-top:12px;color:var(--red)">SnowLuma 等协议端仓库被删、停更<br>搭在上面的系统一起停摆</div></div>
+    <div class="card rise d2" style="flex:1"><div style="font-size:20px;color:var(--sub)">账号在刀口上</div>
+      <div style="font-size:24px;margin-top:12px">逆向协议、注入客户端<br>被针对性风控，主号不敢上</div></div>
+    <div class="card rise d3" style="flex:1"><div style="font-size:20px;color:var(--sub)">每次都要跟着修</div>
+      <div style="font-size:24px;margin-top:12px">协议一改<br>整条链路重做一遍</div></div>
+  </div>
+</section>
+
+<!-- 3 另一条路 -->
+<section class="slide">
+  <div class="h2 rise">另一条路：<span class="teal">让客户端自己发</span></div>
+  <div class="sub rise">不拼包 · 不注入 · 不需要协议端</div>
+  <div style="flex:1;display:flex;align-items:center;justify-content:center">
+    <svg width="1000" height="300" viewBox="0 0 1000 300">
+      <rect x="20" y="105" width="200" height="80" rx="12" fill="#141A2E" stroke="#2A3358"/>
+      <text x="120" y="140" text-anchor="middle" fill="#EAF0FF" font-size="19">你的系统</text>
+      <text x="120" y="168" text-anchor="middle" fill="#9AA6C8" font-size="15" font-family="Consolas">HTTP / SSE</text>
+
+      <path d="M220 145 H310" stroke="#2BC49A" stroke-width="3" marker-end="url(#b)"/>
+      <defs><marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#2BC49A"/></marker></defs>
+
+      <rect x="310" y="90" width="200" height="110" rx="12" fill="#0F2A26" stroke="#2BC49A" stroke-width="2"/>
+      <text x="410" y="128" text-anchor="middle" fill="#2BC49A" font-size="19" font-weight="600">ArkLink</text>
+      <text x="410" y="156" text-anchor="middle" fill="#9AA6C8" font-size="15">白名单 · 排队 · 保序</text>
+      <text x="410" y="178" text-anchor="middle" fill="#9AA6C8" font-size="15">只发文本</text>
+
+      <path d="M510 145 H600" stroke="#2BC49A" stroke-width="3" marker-end="url(#b)"/>
+
+      <rect x="600" y="75" width="230" height="140" rx="12" fill="#141A2E" stroke="#7F77DD" stroke-width="2"/>
+      <text x="715" y="112" text-anchor="middle" fill="#B7B1F2" font-size="19" font-weight="600">已登录的 QQ 客户端</text>
+      <text x="715" y="142" text-anchor="middle" fill="#9AA6C8" font-size="15">认账号窗口 → 搜会话</text>
+      <text x="715" y="164" text-anchor="middle" fill="#9AA6C8" font-size="15">粘贴 → 回车</text>
+      <text x="715" y="192" text-anchor="middle" fill="#2BC49A" font-size="15">消息由客户端本人产生</text>
+
+      <path d="M830 145 H920" stroke="#7F77DD" stroke-width="3" marker-end="url(#c)"/>
+      <defs><marker id="c" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#7F77DD"/></marker></defs>
+      <text x="960" y="140" text-anchor="middle" fill="#EAF0FF" font-size="18">对方</text>
+      <text x="960" y="166" text-anchor="middle" fill="#9AA6C8" font-size="15">收到</text>
+
+      <text x="500" y="262" text-anchor="middle" fill="#9AA6C8" font-size="19">QQ 改协议？这条路不受影响——发消息的是客户端自己</text>
+    </svg>
+  </div>
+</section>
+
+<!-- 4 定位 -->
+<section class="slide">
+  <div class="h2 rise">不是又一个框架，是<span class="teal">运行时</span></div>
+  <div class="sub rise">收发 · 白名单 · 去重 · 续传，都归它</div>
+  <div style="flex:1;display:flex;flex-direction:column;gap:14px;justify-content:center;max-width:820px;margin:0 auto;width:100%">
+    <div class="card rise d1" style="padding:16px 26px"><b>上层业务</b><span style="color:var(--sub)">　你的系统 / Python 脚本 / 任何语言</span></div>
+    <div class="card rise d2" style="padding:16px 26px"><b>接口层</b><span style="color:var(--sub)">　HTTP · SSE · SDK · 回调</span></div>
+    <div class="card rise d3" style="padding:16px 26px;border-color:var(--teal)"><b class="teal">运行时 ★</b>
+      <span style="color:var(--sub)">　唯一消息总线 · 序号 · 去重 · 续传 · 能力矩阵</span></div>
+    <div class="card rise d4" style="padding:16px 26px"><b>通道</b><span style="color:var(--sub)">　UI 客户端（Win）· x11 无头（Linux）· OneBot 11</span></div>
+  </div>
+</section>
+
+<!-- 5 总线 -->
+<section class="slide">
+  <div class="h2 rise">所有消息只有<span class="teal">一条总线</span></div>
+  <div style="flex:1;display:flex;align-items:center;justify-content:center">
+    <svg width="960" height="330" viewBox="0 0 960 330">
+      <!-- 输入 -->
+      <text x="20" y="40" fill="#9AA6C8" font-size="18">通道推送</text>
+      <rect x="20" y="60" width="150" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="95" y="92" text-anchor="middle" fill="#EAF0FF" font-size="17" font-family="Consolas">/inbound</text>
+      <rect x="20" y="128" width="150" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="95" y="160" text-anchor="middle" fill="#EAF0FF" font-size="17" font-family="Consolas">hook</text>
+      <rect x="20" y="196" width="150" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="95" y="228" text-anchor="middle" fill="#EAF0FF" font-size="17" font-family="Consolas">x11</text>
+      <path d="M170 86 H250 Q270 86 270 106 V160 Q270 180 290 180" stroke="#2A3358" stroke-width="3" fill="none"/>
+      <path d="M170 154 H290" stroke="#2A3358" stroke-width="3" fill="none"/>
+      <path d="M170 222 H250 Q270 222 270 202 V180 Q270 180 290 180" stroke="#2A3358" stroke-width="3" fill="none"/>
+      <!-- 总线 -->
+      <rect x="290" y="120" width="330" height="120" rx="16" fill="#0F2A26" stroke="#2BC49A" stroke-width="2"/>
+      <text x="455" y="158" text-anchor="middle" fill="#2BC49A" font-size="22" font-weight="600">MessageBus</text>
+      <text x="455" y="186" text-anchor="middle" fill="#9AA6C8" font-size="16">环形缓冲 2000 · seq 单调</text>
+      <text x="455" y="212" text-anchor="middle" fill="#9AA6C8" font-size="16">message_id 去重</text>
+      <circle r="6" fill="#fff">
+        <animateMotion dur="2s" repeatCount="indefinite" path="M20 86 H250 Q270 86 270 140 H455"/>
+      </circle>
+      <circle r="6" fill="#fff">
+        <animateMotion dur="2s" begin="0.7s" repeatCount="indefinite" path="M20 222 H250 Q270 222 270 140 H455"/>
+      </circle>
+      <!-- 输出 -->
+      <path d="M620 180 H690" stroke="#2BC49A" stroke-width="3" fill="none" marker-end="url(#a)"/>
+      <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#2BC49A"/></marker></defs>
+      <rect x="700" y="70" width="240" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="820" y="102" text-anchor="middle" fill="#EAF0FF" font-size="16" font-family="Consolas">GET /stream?since=</text>
+      <rect x="700" y="140" width="240" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="820" y="172" text-anchor="middle" fill="#EAF0FF" font-size="16" font-family="Consolas">GET /messages</text>
+      <rect x="700" y="210" width="240" height="52" rx="10" fill="#141A2E" stroke="#2A3358"/>
+      <text x="820" y="242" text-anchor="middle" fill="#EAF0FF" font-size="16" font-family="Consolas">bot.run()</text>
+      <text x="480" y="306" text-anchor="middle" fill="#9AA6C8" font-size="19">断线不丢不重：带上 since 接着读</text>
+    </svg>
+  </div>
+</section>
+
+<!-- 6 三种接法 -->
+<section class="slide">
+  <div class="h2 rise">三种接法，任挑一种</div>
+  <div style="display:flex;gap:22px;margin-top:38px;flex:1">
+    <div class="card rise d1" style="flex:1.2">
+      <b class="teal">Python 回调</b>
+      <div class="mono" style="font-size:17px;line-height:1.75;margin-top:12px">
+        <span style="color:var(--amber)">from</span> arklink.bot <span style="color:var(--amber)">import</span> Bot<br>
+        bot = Bot()<br><br>
+        <span style="color:var(--purple)">@bot.on_message</span><br>
+        <span style="color:var(--amber)">def</span> echo(msg):<br>
+        &nbsp;&nbsp;<span style="color:var(--amber)">return</span> f<span style="color:var(--green)">"收到：{msg['text']}"</span>
+      </div>
+    </div>
+    <div class="card rise d2" style="flex:1"><b>HTTP + SSE</b>
+      <div class="sub" style="margin-top:12px">任何语言都能接<br>收：长连接读事件<br>发：POST 一个 JSON</div></div>
+    <div class="card rise d3" style="flex:1"><b>OneBot 11</b>
+      <div class="sub" style="margin-top:12px">老生态零改动<br>反向 WS / HTTP 都认<br>上层软件不用改</div></div>
+  </div>
+</section>
+
+<!-- 7 能力矩阵 -->
+<section class="slide">
+  <div class="h2 rise">能做什么，<span class="teal">逐条写清楚</span></div>
+  <div style="display:flex;gap:36px;margin-top:36px;flex:1;align-items:flex-start">
+    <div class="card rise d1" style="flex:1.1;padding:18px 26px">
+      <div class="mono" style="font-size:18px;line-height:2.05">
+        <span class="green">✓</span> send.text　　发文本<br>
+        <span class="green">✓</span> receive.message　收消息<br>
+        <span class="green">✓</span> policy　　　 白名单闸门<br>
+        <span class="green">✓</span> roster　　　 好友 / 群列表<br>
+        <span class="red">✗</span> send.image　　缺：进程内直发<br>
+        <span class="red">✗</span> send.at ／ reply ／ recall
+      </div>
+    </div>
+    <div class="rise d2" style="flex:1">
+      <div class="card" style="border-color:var(--red)">
+        <div style="font-size:20px;color:var(--red)">做不到就直说</div>
+        <div class="mono" style="font-size:17px;line-height:1.8;margin-top:10px;color:#F0D5D5">
+          { "ok": false, "code": 1404,<br>
+          &nbsp;&nbsp;"msg": "当前通道发不了图片",<br>
+          &nbsp;&nbsp;"need": "需要进程内直发通道" }
+        </div>
+      </div>
+      <div class="sub" style="margin-top:18px">不返回「成功」再悄悄失败<br>调用方拿到的是能照做的下一步</div>
+    </div>
+  </div>
+</section>
+
+<!-- 8 安全默认 -->
+<section class="slide">
+  <div class="h2 rise">出厂白名单是<span class="red">空的</span></div>
+  <div class="sub rise">默认全拒，同时把下一条命令告诉你</div>
+  <div style="flex:1;display:flex;align-items:center;gap:30px;margin-top:10px">
+    <div class="card rise d2" style="flex:1">
+      <div class="mono" style="font-size:18px;line-height:1.9">
+        <span style="color:var(--sub)">$</span> arklink send --to 示例好友 --text hi<br>
+        <span class="red">✗ 1403 发送账号白名单是空的（出厂默认）</span><br>
+        <span style="color:var(--sub)">  → 先 arklink peers uin &lt;你的QQ号&gt;</span>
+      </div>
+    </div>
+    <div class="rise d3" style="flex:1">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="card" style="padding:14px 22px"><b>账号闸门</b><span style="color:var(--sub)">　只允许你配的号发</span></div>
+        <div class="card" style="padding:14px 22px"><b>收件人闸门</b><span style="color:var(--sub)">　只发白名单里的人</span></div>
+        <div class="card" style="padding:14px 22px"><b>群聊闸门</b><span style="color:var(--sub)">　默认关闭，要开显式开</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 9 无头虚拟环境 -->
+<section class="slide">
+  <div class="h2 rise">QQ 跑在<span class="teal">无头虚拟机</span>里</div>
+  <div class="sub rise">不抢你的焦点，不碰你的剪贴板</div>
+  <div style="display:flex;gap:26px;margin-top:34px;flex:1">
+    <div class="card rise d1" style="flex:1">
+      <b>一条命令建好</b>
+      <div class="mono" style="font-size:16px;line-height:1.85;margin-top:10px;color:var(--sub)">
+        arklink env plan<br>arklink env create --download<br>arklink env push
+      </div>
+    </div>
+    <div class="card rise d2" style="flex:1;border-color:var(--teal)">
+      <b class="teal">里面是什么</b>
+      <div class="sub" style="margin-top:10px">Ubuntu Server 24.04<br>Xvfb 虚拟屏 + QQ Linux<br>两个服务开机自启</div>
+    </div>
+    <div class="card rise d3" style="flex:1">
+      <b>资源与边界</b>
+      <div class="sub" style="margin-top:10px">约 3.4GB 磁盘 / 2GB 内存<br>6800 WebUI · 6900 bot 接口<br>只绑宿主 127.0.0.1</div>
+    </div>
+  </div>
+</section>
+
+<!-- 10 最近更新 -->
+<section class="slide">
+  <div class="h2 rise">0.8 → 0.12，补上的<span class="teal">五件事</span></div>
+  <div class="sub rise">每一步都有提交、有测试、有文档</div>
+  <div style="flex:1;display:flex;align-items:center">
+    <svg width="1120" height="360" viewBox="0 0 1120 360">
+      <line x1="60" y1="150" x2="1060" y2="150" stroke="#2A3358" stroke-width="4" stroke-linecap="round"/>
+      <line x1="60" y1="150" x2="1060" y2="150" stroke="#2BC49A" stroke-width="2" stroke-dasharray="6 12">
+        <animate attributeName="stroke-dashoffset" from="0" to="-36" dur="2s" repeatCount="indefinite"/>
+      </line>
+      <!-- 节点 -->
+      <g>
+        <circle cx="100" cy="150" r="9" fill="#0B1020" stroke="#5B8DEF" stroke-width="3"/>
+        <text x="100" y="112" text-anchor="middle" fill="#5B8DEF" font-size="22" font-weight="600">0.8</text>
+        <text x="100" y="196" text-anchor="middle" fill="#EAF0FF" font-size="19">发消息打通</text>
+        <text x="100" y="224" text-anchor="middle" fill="#9AA6C8" font-size="15">策略闸门 → 引擎</text>
+        <text x="100" y="248" text-anchor="middle" fill="#9AA6C8" font-size="15">WebUI 一页管理</text>
+      </g>
+      <g>
+        <circle cx="310" cy="150" r="9" fill="#0B1020" stroke="#5B8DEF" stroke-width="3"/>
+        <text x="310" y="112" text-anchor="middle" fill="#5B8DEF" font-size="22" font-weight="600">0.9</text>
+        <text x="310" y="196" text-anchor="middle" fill="#EAF0FF" font-size="19">无头 Linux</text>
+        <text x="310" y="224" text-anchor="middle" fill="#9AA6C8" font-size="15">x11 引擎</text>
+        <text x="310" y="248" text-anchor="middle" fill="#9AA6C8" font-size="15">真不抢焦点</text>
+      </g>
+      <g>
+        <circle cx="520" cy="150" r="9" fill="#0B1020" stroke="#7F77DD" stroke-width="3"/>
+        <text x="520" y="112" text-anchor="middle" fill="#7F77DD" font-size="22" font-weight="600">0.10</text>
+        <text x="520" y="196" text-anchor="middle" fill="#EAF0FF" font-size="19">内置虚拟环境</text>
+        <text x="520" y="224" text-anchor="middle" fill="#9AA6C8" font-size="15">env plan / create</text>
+        <text x="520" y="248" text-anchor="middle" fill="#9AA6C8" font-size="15">push / status</text>
+      </g>
+      <g>
+        <circle cx="730" cy="150" r="9" fill="#0B1020" stroke="#7F77DD" stroke-width="3"/>
+        <text x="730" y="112" text-anchor="middle" fill="#7F77DD" font-size="22" font-weight="600">0.11</text>
+        <text x="730" y="196" text-anchor="middle" fill="#EAF0FF" font-size="19">不碰命令行</text>
+        <text x="730" y="224" text-anchor="middle" fill="#9AA6C8" font-size="15">双击 start.bat</text>
+        <text x="730" y="248" text-anchor="middle" fill="#9AA6C8" font-size="15">peers 白名单</text>
+      </g>
+      <g>
+        <circle cx="960" cy="150" r="11" fill="#2BC49A" stroke="#2BC49A" stroke-width="3"/>
+        <circle cx="960" cy="150" r="20" fill="none" stroke="#2BC49A" stroke-width="1.5" opacity=".5">
+          <animate attributeName="r" from="14" to="30" dur="1.8s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" from=".6" to="0" dur="1.8s" repeatCount="indefinite"/>
+        </circle>
+        <text x="960" y="112" text-anchor="middle" fill="#2BC49A" font-size="22" font-weight="600">0.12</text>
+        <text x="960" y="196" text-anchor="middle" fill="#EAF0FF" font-size="19" font-weight="600">bot 运行时</text>
+        <text x="960" y="224" text-anchor="middle" fill="#9AA6C8" font-size="15">收发接口 · 能力矩阵</text>
+        <text x="960" y="248" text-anchor="middle" fill="#9AA6C8" font-size="15">虚拟机后台服务</text>
+      </g>
+      <text x="560" y="60" text-anchor="middle" fill="#9AA6C8" font-size="18">同一个仓库，一条连续的路</text>
+    </svg>
+  </div>
+</section>
+
+<!-- 11 测试 -->
+<section class="slide">
+  <div class="h2 rise"><span class="green">310</span> 项测试通过 · 体检逐项给下一步</div>
+  <div style="display:flex;gap:24px;margin-top:46px;flex:1">
+    <div class="card rise d1" style="flex:1;text-align:center"><div style="font-size:58px;font-weight:600" class="green">310</div>
+      <div class="sub">测试通过<br>9 项按平台跳过</div></div>
+    <div class="card rise d2" style="flex:1;text-align:center"><div style="font-size:58px;font-weight:600" class="teal">13</div>
+      <div class="sub">离线自检<br>不联网也能跑</div></div>
+    <div class="card rise d3" style="flex:1;text-align:center"><div style="font-size:58px;font-weight:600" style="color:var(--purple)">5</div>
+      <div class="sub">步体检<br>bot check</div></div>
+  </div>
+</section>
+
+<!-- 12 共创 -->
+<section class="slide">
+  <div class="h2 rise">这条路，欢迎一起<span class="teal">修宽</span></div>
+  <div class="sub rise">缺口都写在能力矩阵里，从带 need 的那一条开始</div>
+  <div style="display:flex;gap:22px;margin-top:36px;flex:1">
+    <div class="card rise d1" style="flex:1">
+      <b>协议研究</b>
+      <div class="sub" style="margin-top:10px">hook 收包侧还差最后一段<br>笔记和失败记录都在仓库里</div>
+    </div>
+    <div class="card rise d2" style="flex:1">
+      <b>通道适配</b>
+      <div class="sub" style="margin-top:10px">新协议按契约写一个适配器<br>不用改上层</div>
+    </div>
+    <div class="card rise d3" style="flex:1">
+      <b>文档与踩坑</b>
+      <div class="sub" style="margin-top:10px">你踩过的坑<br>就是下一个人少走的路</div>
+    </div>
+  </div>
+  <div class="rise d4" style="text-align:center;color:var(--sub);font-size:20px;margin-top:16px">
+    Issue / PR 都欢迎 · 能力矩阵里 <span class="red">✗</span> 的每一项都标了缺什么
+  </div>
+</section>
+
+<!-- 13 收尾 -->
+<section class="slide">
+  <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center">
+    <div class="h1 rise" style="text-align:center;font-size:46px;line-height:1.4">你的系统发一条消息<br>QQ 那头就<span class="teal">收到了</span></div>
+    <div class="card rise d2 mono" style="margin-top:34px;font-size:20px;padding:18px 34px;line-height:1.9">
+      git clone …/ArkLink && pip install -e .<br>
+      arklink serve api　<span style="color:var(--sub)"># 起接口，地址和 token 自动落盘</span><br>
+      arklink bot new mybot.py && arklink bot run mybot.py
+    </div>
+    <div class="card rise d3 mono" style="margin-top:20px;font-size:24px;padding:14px 34px;border-color:var(--teal)">
+      github.com/panxian-AI/ArkLink　<span class="amber">★ Star</span>
+    </div>
+  </div>
+</section>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const durs=[5000,7000,8000,6000,8000,8000,7000,7000,8000,7000,6000,7000,6000];
+  const bar=document.getElementById('bar'),hud=document.getElementById('hud');
+  let cur=0,timer=null,playing=true;
+  function fit(){const s=Math.min(innerWidth/1280,innerHeight/720)*0.98;
+    document.getElementById('stage').style.transform='scale('+s+')';}
+  addEventListener('resize',fit);fit();
+  function show(i){slides[cur].classList.remove('on');cur=i;
+    slides[cur].classList.add('on');
+    hud.textContent=(i+1)+" / "+slides.length;
+    bar.style.width=((i+1)/slides.length*100)+'%';
+    clearTimeout(timer);
+    if(playing)timer=setTimeout(next,durs[i]);}
+  function next(){show((cur+1)%slides.length);}
+  function toggle(){playing=!playing;clearTimeout(timer);
+    if(playing)timer=setTimeout(next,durs[cur]);
+    document.getElementById('hint').textContent=playing?"空格 / 点击暂停 · 自动循环放映（PPT 演示视频 · 可录屏出 MP4）":"已暂停 · 点击继续";}
+  addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();toggle();}});
+  document.getElementById('stage').addEventListener('click',toggle);
+  show(0);
+</script>
+</body>
+</html>

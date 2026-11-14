@@ -187,6 +187,9 @@ def test_push_creates_opt_dir_before_copy():
     joins = [" ".join(c[1:]) for c in mgr.require_box().runner.calls]
     mkdir_idx = next(i for i, c in enumerate(joins)
                      if "mkdir -p /opt/ArkLink" in c and "chown" in c)
+    # 必须递归 chown：上一次 setup 以 sudo 跑过的话，目录里还有 root 的
+    # egg-info 之类老文件，copyto 覆盖它们会 VERR_ACCESS_DENIED
+    assert "chown -R" in joins[mkdir_idx]
     copy_idx = next(i for i, c in enumerate(joins) if "copyto" in c)
     setup_idx = next(i for i, c in enumerate(joins) if "setup_guest.sh" in c)
     assert mkdir_idx < copy_idx < setup_idx
@@ -338,6 +341,74 @@ def test_download_iso_verifies_checksum(tmp_path):
                      log=lambda *_: None)
     assert "校验失败" in str(err.value)
     assert not (tmp_path / "v.iso").exists()
+
+
+def test_download_iso_resumes_from_part_file(tmp_path):
+    """真机第一次下载在 6% 断了：必须留着 .part 带 Range 续传，不能从 0 重来。"""
+    payload = b"0123456789abcdef"
+    dest = tmp_path / "u.iso"
+    part = tmp_path / "u.iso.part"
+    part.write_bytes(payload[:8])  # 上次下了前一半
+
+    seen: dict = {}
+
+    class Resp:
+        status = 206
+        headers = {"Content-Length": str(len(payload) - 8)}
+
+        def read(self, n=-1):
+            if seen.get("done"):
+                return b""
+            seen["done"] = True
+            return payload[8:]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=0):
+        seen["range"] = dict(getattr(req, "headers", {})).get("Range")
+        return Resp()
+
+    download_iso(IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload)), str(dest),
+                 opener=opener, log=lambda *_: None)
+    assert seen["range"] == "bytes=8-"
+    assert dest.read_bytes() == payload
+
+
+def test_download_iso_retries_after_network_error(tmp_path):
+    """断线算正常事件：重试一次能接上就不该让用户重跑命令。"""
+    payload = b"abc"
+    dest = tmp_path / "u.iso"
+    attempts = {"n": 0}
+
+    class Resp:
+        status = 200
+        headers = {"Content-Length": str(len(payload))}
+
+        def read(self, n=-1):
+            if attempts.get("read"):
+                return b""
+            attempts["read"] = True
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout=0):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("connection reset by peer")
+        return Resp()
+
+    download_iso(IsoRef("u.iso", "http://x/u.iso", sha256_of_bytes(payload)), str(dest),
+                 opener=opener, log=lambda *_: None)
+    assert attempts["n"] >= 2 and dest.read_bytes() == payload
 
 
 def test_find_local_iso(tmp_path):

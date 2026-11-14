@@ -1122,9 +1122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_env = sub.add_parser("env", help="内置虚拟环境：建/启/停/推代码/删（跑 QQ 用）")
     p_env.add_argument("action",
                        choices=["plan", "create", "up", "down", "status", "eject", "push",
-                                "destroy", "token", "doctor"],
-                       help="plan=算账 create=建并装 up/down=启停 eject=摘ISO push=推仓库 "
-                            "destroy=删 doctor=体检排障（可接 DeepSeek AI）")
+                                "destroy", "token", "doctor", "setup", "wait"],
+                       help="setup=一条命令全自动（建机→等装完→推代码）；"
+                            "doctor=体检排障（可接 DeepSeek AI）")
     p_env.add_argument("--name", default="arklink", help="虚拟机名（默认 arklink）")
     p_env.add_argument("--iso", default="", help="Ubuntu Server ISO 路径（不给就先在常见目录找）")
     p_env.add_argument("--iso-url", default="", help="自定义 ISO 下载地址（默认用官方 24.04 SHA256SUMS 解析）")
@@ -1228,6 +1228,71 @@ def _env(args: argparse.Namespace) -> int:
               "装完自动重启进系统）。等 `arklink env status` 显示在线后：")
         print(f"  arklink env push --password {password}   # 把仓库推进去并装 QQ/Xvfb/Arklink")
         print(f"  arklink env status                        # 看状态与磁盘占用")
+        return 0
+
+    if args.action == "wait":
+        password = args.password or mgr.state.extra.get("password") or ""
+        if not password and not args.dry_run:
+            return fail("需要 guest 密码：--password <密码>")
+        print("[env] 等无人值守安装完成（guestcontrol 能进去就算好）…")
+        ok = mgr.wait_ready(password=password)
+        if not ok:
+            return fail("等了 25 分钟还是进不去。检查：arklink env status（VM 是否 running）、"
+                        "虚拟机控制台截图（VirtualBox 界面里看），然后 arklink env doctor")
+        print("[env] 系统已就绪。下一步：arklink env push --password <密码>")
+        return 0
+
+    if args.action == "setup":
+        # 一条命令从零到能发消息：建机（含下载/续传 ISO）→ 等装完 → 推代码装 QQ。
+        # 每一步都幂等：已经做过的自动跳过，断了重跑同一条命令即可。
+        password = (args.password or mgr.state.extra.get("password")
+                    or secrets.token_urlsafe(9))
+        status = mgr.status()
+        if not status.get("exists"):
+            iso = args.iso or find_local_iso() or find_local_iso([plan.workdir])
+            if not iso:
+                try:
+                    ref = resolve_iso()
+                except Exception as exc:
+                    return fail(f"{exc}\n手动下载后 --iso 指定")
+                target = os.path.join(plan.workdir, ref.name)
+                print(f"[env] 下载 ISO（支持断点续传/自动重试）：{ref.url}")
+                try:
+                    iso = download_iso(ref, target)
+                except RuntimeError as exc:
+                    return fail(str(exc))
+            print(f"[env] guest 用户 {args.user}，密码 {password}（记进 ~/.arklink/env.json）")
+            try:
+                mgr.create(iso, user=args.user, password=password, force=args.force)
+            except (VBoxError, RuntimeError, FileNotFoundError) as exc:
+                return fail(str(exc))
+        elif status.get("state") != "running":
+            mgr.up()
+            print("[env] 虚拟机已启动")
+
+        print("[env] 等系统装好（首次约 10–20 分钟；已装好的话几秒就过）…")
+        if not mgr.wait_ready(password=password):
+            return fail("等不到 guest 就绪：arklink env status 看状态，"
+                        "或 arklink env doctor --password <密码>")
+
+        source = args.source or os.getcwd()
+        setup_script = os.path.join(source, "tools", "setup_guest.sh")
+        if not os.path.isfile(setup_script):
+            return fail(f"{source} 里没有 tools/setup_guest.sh，--source 指到仓库根目录再试")
+        print("[env] 推代码进虚拟机并安装 QQ/Xvfb（约 3–8 分钟）…")
+        try:
+            mgr.push(source, password=password)
+        except VBoxError as exc:
+            return fail(f"{exc}\n重跑同一条命令会接着来（幂等）")
+
+        print()
+        print("[env] 完成。接下来：")
+        print(f"  1) 浏览器打开 http://127.0.0.1:{plan.webui_port}/screen 看虚拟屏幕并扫码登录 QQ")
+        print("  2) 登录后备份登录态（崩溃免扫码）：")
+        print(f"     VBoxManage guestcontrol {plan.name} run --exe /bin/bash --username {args.user} "
+              f"--password {password} -- -lc 'tar czf ~/qq-login.tgz -C ~ .config/QQ'")
+        print(f"  3) 体检：arklink env doctor --password {password}  （疑难加 --ai --key sk-xxx）")
+        print(f"  4) 上层程序接 API：arklink env token --password {password}")
         return 0
 
     if args.action == "status":
