@@ -140,11 +140,17 @@ is_login_window() {
 }
 
 # 二维码过期 → 自动点「刷新」。
-# 判据：二维码卡片区域出现成片的红色像素（"当前二维码已过期" 那行红字）。
+# 判据：二维码卡片区域出现「当前二维码已过期」的红字。
+#   convert txt:- 每行形如 "122,234: (247,81,54)  #F75136  srgb(247,81,54)"，
+#   按 [(,)] 切字段：第 1 列是 x、第 2 列是 y、之后依次 R/G/B（**第 2 列是 y
+#   不是 R**，字段序写错就是一句不痛不痒的 0，检测形同虚设——真机踩过）。
+#   还必须看红色的**横向跨度**：二维码中间的企鹅 logo 有红围巾
+#   （实测 167px、宽 28px），只数总量会把有效码误当过期、扫码扫一半被刷掉；
+#   过期红字是一条横带（实测 313px、宽 108px）——宽 >60px 才算过期。
 # 旧码本来就已经失效，点刷新不会打断任何正在进行的扫码。
 qr_refresh() {
   command -v convert >/dev/null 2>&1 || return 0
-  local id X Y WIDTH HEIGHT shot red rx ry
+  local id X Y WIDTH HEIGHT shot red red_n red_w rx ry
   shot=/tmp/.ark_qr.png
   for id in \$(xdotool search --onlyvisible --name '^QQ\$' 2>/dev/null); do
     eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
@@ -152,18 +158,61 @@ qr_refresh() {
     scrot -o "\$shot" >/dev/null 2>&1 || return 0
     # 卡片区在窗口内的相对位置：x 60..260，y 110..310
     rx=\$((X + 60)); ry=\$((Y + 110))
-    # 红字判据：R>180 且 G/B<130（"当前二维码已过期" 就是这种红）
-    red=\$(convert "\$shot" -crop 200x200+\${rx}+\${ry} txt:- 2>/dev/null | awk -F'[(,)]' 'NR>1 && \$2+0>180 && \$3+0<130 && \$4+0<130 {n++} END{print n+0}')
+    red=\$(convert "\$shot" -crop 200x200+\${rx}+\${ry} txt:- 2>/dev/null | awk -F'[(,)]' 'NR>1 && \$3+0>180 && \$4+0<130 && \$5+0<130 {n++; x=\$1+0; if(min==""||x<min)min=x; if(max==""||x>max)max=x} END{if(n>0) print n, max-min; else print "0 0"}')
+    red_n=\${red%% *}; red_w=\${red##* }
+    # 心跳日志：每轮的检测值都落盘，出问题一眼看出是「没检测到」还是「没点上」
+    echo "\$(date +%T) red=\$red" >> /tmp/wd.log
     rm -f "\$shot"
     # 防抖：连续两轮都检测到红字才动手，避免把「正在自动登录」的过渡画面误当过期
     local state=/tmp/.ark_qr_red n
-    if [ "\${red:-0}" -gt 120 ]; then
+    if [ "\${red_n:-0}" -gt 120 ] && [ "\${red_w:-0}" -gt 60 ]; then
       n=\$(cat "\$state" 2>/dev/null || echo 0)
       if [ "\$n" -lt 1 ]; then echo 1 > "\$state"; return 0; fi
       echo 0 > "\$state"
       xdotool windowactivate "\$id" 2>/dev/null; sleep 0.4
       xdotool mousemove --window "\$id" 160 281 click 1 2>/dev/null
       echo "[\$(date '+%F %T')] QR expired -> clicked refresh"
+      sleep 1
+    else
+      echo 0 > "\$state" 2>/dev/null || true
+    fi
+  done
+}
+
+# 快捷登录窗口（QQ 重启后记住账号，显示头像 + 蓝色「登录」按钮）：
+# 检测到蓝按钮就点，免得人去点。有两种窗口形态，按钮位置不同：
+#   窄版 320x460：按钮中心 (160,327)，核心区窗口相对 +105+313（110x28）；
+#   宽版 680x440：QQ 崩溃/被反复杀后容易掉进这种，按钮中心 (340,354)，
+#                 核心区窗口相对 +285+340（110x28）。
+# 判据：核心区成片 QQ 蓝 #0099FF——窄版实测 2863/3080 像素是蓝；二维码窗口
+# 这个位置没有这片蓝，不会误点；主窗口尺寸不符也不会进来。
+quick_login() {
+  command -v convert >/dev/null 2>&1 || return 0
+  local id X Y WIDTH HEIGHT shot bx by cx cy blue state n
+  shot=/tmp/.ark_quick.png
+  for id in \$(xdotool search --onlyvisible --name '^QQ\$' 2>/dev/null); do
+    eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
+    # 窄版 320x460 或宽版 680x440 都认（复用 is_login_window 的窄版判据）
+    if [ "\$WIDTH" -ge 600 ] && [ "\$WIDTH" -le 760 ] && [ "\$HEIGHT" -ge 400 ] && [ "\$HEIGHT" -le 500 ]; then
+      bx=\$((X + 285)); by=\$((Y + 340)); cx=340; cy=354
+    elif is_login_window "\$WIDTH" "\$HEIGHT"; then
+      bx=\$((X + 105)); by=\$((Y + 313)); cx=160; cy=327
+    else
+      continue
+    fi
+    scrot -o "\$shot" >/dev/null 2>&1 || return 0
+    blue=\$(convert "\$shot" -crop 110x28+\${bx}+\${by} txt:- 2>/dev/null | awk -F'[(,)]' 'NR>1 && \$3+0<100 && \$4+0>120 && \$4+0<200 && \$5+0>200 {n++} END{print n+0}')
+    echo "\$(date +%T) quick_blue=\$blue \${WIDTH}x\${HEIGHT}" >> /tmp/wd.log
+    rm -f "\$shot"
+    # 防抖：连续两轮都看到蓝按钮才点，避开登录过渡画面
+    if [ "\${blue:-0}" -gt 1200 ]; then
+      state=/tmp/.ark_quick_state
+      n=\$(cat "\$state" 2>/dev/null || echo 0)
+      if [ "\$n" -lt 1 ]; then echo 1 > "\$state"; return 0; fi
+      echo 0 > "\$state"
+      xdotool windowactivate "\$id" 2>/dev/null; sleep 0.4
+      xdotool mousemove --window "\$id" \$cx \$cy click 1 2>/dev/null
+      echo "[\$(date '+%F %T')] quick login -> clicked 登录 (\${WIDTH}x\${HEIGHT})"
       sleep 1
     else
       echo 0 > "\$state" 2>/dev/null || true
@@ -188,8 +237,135 @@ dismiss_popups() {
   done
 }
 
+# 「下线通知」弹窗（账号在别处终端登录，本机被踢下线）：盖在登录窗口上，
+# 只有一颗「确定」按钮，Escape 对 frameless 弹窗不保证有效，必须精确点按钮。
+# 弹窗不管是独立窗口还是画在登录窗口内部的覆盖层，像素都落在登录窗口附近，
+# 所以扫「登录窗口外扩 60px 的下半部」（按钮在约 2/3 高度处；上半部的 QQ
+# logo 也是蓝色，限定下半窗 + 行密度双保险排除）。按钮是实心蓝 #0099FF：
+# 最密一行约几十个蓝像素；「账号登录」那种蓝色文字一行只有稀疏几个，
+# 密度判据能干净分开。实测（真实弹窗截图）：按钮 52px 宽、峰值行 45px；
+# 正常二维码页底部蓝链接峰值 68px 但行带高度只有 1px，被高度下限挡住。
+# 双按钮弹窗守卫：蓝按钮右侧同一行如果有浅灰按钮边框（195~215 的中性灰），
+# 说明这是个「蓝按钮 + 白按钮」的双按钮弹窗——典型就是「更新提醒」：
+# 蓝色是「立即重启更新」（点了会重启 QQ 丢登录态！），白色才是「关闭」。
+# 这种情况绝不能点蓝按钮，改按 Escape（实测能关掉更新提醒）。
+#   实测（真机）：关闭按钮左右边框 x=721/798，蓝按钮右缘 712——同排灰边框
+#   就是双按钮的铁证；下线通知是单蓝按钮，右侧同排一片纯白，不会误判。
+dismiss_offline() {
+  command -v convert >/dev/null 2>&1 || return 0
+  local id X Y WIDTH HEIGHT shot hit bx cy ox wxoff
+  shot=/tmp/.ark_off.png
+  for id in \$(xdotool search --onlyvisible --name '^QQ\$' 2>/dev/null); do
+    eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
+    is_login_window "\$WIDTH" "\$HEIGHT" || continue
+    scrot -o "\$shot" >/dev/null 2>&1 || return 0
+    ox=\$((X > 60 ? X - 60 : 0))
+    wxoff=\$((X - ox))
+    hit=\$(convert "\$shot" -crop "\$((WIDTH + 120))x\$((HEIGHT / 2 + 30))+\${ox}+\$((Y + HEIGHT / 2))" txt:- 2>/dev/null | awk -F'[(,)]' -v wxoff="\$wxoff" -v half="\$((HEIGHT / 2))" -v ww="\$WIDTH" '
+      NR>1 {
+        x=\$1+0; y=\$2+0
+        if (\$3+0<120 && \$4+0>110 && \$4+0<210 && \$5+0>190) {
+          cnt[y]++
+          if (!(y in rmin) || x<rmin[y]) rmin[y]=x
+          if (!(y in rmax) || x>rmax[y]) rmax[y]=x
+        }
+        if (n<30000 && \$3+0>=195 && \$3+0<=215 && \$4+0>=195 && \$4+0<=215 && \$5+0>=195 && \$5+0<=215 && (\$3-\$4<6) && (\$4-\$5<6) && (\$5-\$3<6)) {
+          n++; gx[n]=x; gy[n]=y
+        }
+      }
+      END {
+        best=0; by=-1
+        for (y in cnt) if (cnt[y]>best) { best=cnt[y]; by=y }
+        if (best<30) { print ""; exit }
+        lo=by; hi=by
+        while ((lo-1) in cnt && cnt[lo-1]>=best/2) lo--
+        while ((hi+1) in cnt && cnt[hi+1]>=best/2) hi++
+        xmin=rmin[lo]; xmax=rmax[lo]
+        for (y=lo+1; y<=hi; y++) {
+          if (rmin[y]<xmin) xmin=rmin[y]
+          if (rmax[y]>xmax) xmax=rmax[y]
+        }
+        w=xmax-xmin+1; h=hi-lo+1
+        if (!(w>=ww*0.12 && w<=ww*0.6 && h>=18 && h<=55 && best>=w/2)) { print ""; exit }
+        twin=0
+        for (i=1; i<=n; i++)
+          if (gy[i]>=lo && gy[i]<=hi && gx[i]>xmax+1 && gx[i]<=xmax+150) {
+            gcnt[gx[i]]++
+            if (gcnt[gx[i]]>twin) twin=gcnt[gx[i]]
+          }
+        # 边框是一条竖线（同一 x 上连续二三十行）；零散灰阶抗锯齿到不了 10 行
+        if (twin>=10) { print "esc"; exit }
+        print xmin+int(w/2)-wxoff, half+int((lo+hi)/2)
+      }')
+    [ -n "\$hit" ] || continue
+    xdotool windowactivate "\$id" 2>/dev/null; sleep 0.4
+    if [ "\$hit" = "esc" ]; then
+      xdotool key --clearmodifiers Escape 2>/dev/null
+      echo "[\$(date '+%F %T')] twin-button dialog over login window -> escaped (never click its blue button)"
+    else
+      bx=\${hit%% *}; cy=\${hit##* }
+      xdotool mousemove --window "\$id" "\$bx" "\$cy" click 1 2>/dev/null
+      echo "[\$(date '+%F %T')] offline notice -> clicked confirm at \$bx,\$cy"
+    fi
+    sleep 1
+  done
+}
+
+# 「更新提醒」弹窗（修复了一些已知问题/新增了戳一戳……）：画在 QQ 主窗口
+# 内部的覆盖层，xdotool 看不到独立窗口，dismiss_popups 的 Escape 够不着它
+# （它只处理独立窗口）。蓝按钮是「立即重启更新」——点了 QQ 会重启升级、
+# 丢登录态，**永远不能点**；正确做法是 Escape（实测能关掉它，等效点「关闭」）。
+# 判据：大窗口（主窗口，非登录窗）内出现实心蓝按钮行带。实测真机：
+#   有弹窗 峰值=108 宽=108 高=32 → 命中；正常主窗口 蓝峰值=0 → 不误触发。
+dismiss_update() {
+  command -v convert >/dev/null 2>&1 || return 0
+  local id X Y WIDTH HEIGHT shot hit ox oy wxoff wyoff
+  shot=/tmp/.ark_upd.png
+  for id in \$(xdotool search --onlyvisible --name '^QQ\$' 2>/dev/null); do
+    eval "\$(xdotool getwindowgeometry --shell "\$id" 2>/dev/null)" || continue
+    # 窄版 320x460 和宽版 680x440 都是登录窗本体，不是弹窗，别碰
+    is_login_window "\$WIDTH" "\$HEIGHT" && continue
+    if [ "\$WIDTH" -ge 600 ] && [ "\$WIDTH" -le 760 ] && [ "\$HEIGHT" -ge 400 ] && [ "\$HEIGHT" -le 500 ]; then continue; fi
+    [ "\$WIDTH" -gt 400 ] && [ "\$HEIGHT" -gt 400 ] || continue
+    scrot -o "\$shot" >/dev/null 2>&1 || return 0
+    ox=\$((X > 40 ? X - 40 : 0)); oy=\$((Y > 40 ? Y - 40 : 0))
+    wxoff=\$((X - ox)); wyoff=\$((Y - oy))
+    hit=\$(convert "\$shot" -crop "\$((WIDTH + 80))x\$((HEIGHT + 80))+\${ox}+\${oy}" txt:- 2>/dev/null | awk -F'[(,)]' '
+      NR>1 && \$3+0<120 && \$4+0>110 && \$4+0<210 && \$5+0>190 {
+        x=\$1+0; y=\$2+0
+        cnt[y]++
+        if (!(y in rmin) || x<rmin[y]) rmin[y]=x
+        if (!(y in rmax) || x>rmax[y]) rmax[y]=x
+      }
+      END {
+        best=0; by=-1
+        for (y in cnt) if (cnt[y]>best) { best=cnt[y]; by=y }
+        if (best<30) { print ""; exit }
+        lo=by; hi=by
+        while ((lo-1) in cnt && cnt[lo-1]>=best/2) lo--
+        while ((hi+1) in cnt && cnt[hi+1]>=best/2) hi++
+        xmin=rmin[lo]; xmax=rmax[lo]
+        for (y=lo+1; y<=hi; y++) {
+          if (rmin[y]<xmin) xmin=rmin[y]
+          if (rmax[y]>xmax) xmax=rmax[y]
+        }
+        w=xmax-xmin+1; h=hi-lo+1
+        if (w>=60 && w<=200 && h>=20 && h<=55 && best>=w/2) print "esc"
+        else print ""
+      }')
+    [ "\$hit" = "esc" ] || continue
+    xdotool windowactivate "\$id" 2>/dev/null; sleep 0.4
+    xdotool key --clearmodifiers Escape 2>/dev/null
+    echo "[\$(date '+%F %T')] update reminder -> escaped (never restart QQ)"
+    sleep 1
+  done
+}
+
 watchdog() {
   dismiss_popups
+  dismiss_offline
+  dismiss_update
+  quick_login
   qr_refresh
 }
 
@@ -225,6 +401,11 @@ watchdog
 
 # Arklink 控制面：只监听本机，外面通过端口映射/隧道访问
 # （故意写成一行：heredoc 里行尾续行符容易被转义规则搞坏，一行最稳）
+# 先清掉占着 6800 的老进程：systemd 重启时 KillMode=process 只杀 start.sh，
+# 上一轮的 webui python 会继续持有端口，新实例绑定时直接 EADDRINUSE 退出，
+# 然后 Restart=always 无限重启——整栈看起来"活着"，实际 WebUI 早没了（真机踩过）。
+command -v fuser >/dev/null 2>&1 && fuser -k 6800/tcp >/dev/null 2>&1
+sleep 1
 /opt/arklink-venv/bin/python -m arklink serve webui --host 0.0.0.0 --port 6800 --engine x11 &
 WEBUI=\$!
 
@@ -237,6 +418,7 @@ while kill -0 \$WEBUI 2>/dev/null; do
 done
 heal
 wait \$WEBUI
+
 EOF
 chmod +x /opt/arklink/start.sh
 
