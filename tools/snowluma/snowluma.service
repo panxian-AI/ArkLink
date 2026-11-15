@@ -1,0 +1,20 @@
+[Unit]
+Description=SnowLuma QQ bridge (hook + OneBot)
+Documentation=https://github.com/TomyJan/SnowLuma
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arklink
+Environment=HOME=/home/arklink
+WorkingDirectory=/opt/snowluma
+ExecStart=/opt/snowluma/run.sh
+Restart=always
+RestartSec=5
+# QQ 重启（watchdog 换进程）后 hook 会自动重新注入，不需要跟着重启；
+# 但 SnowLuma 自己崩了要回来，所以 Restart=always。
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

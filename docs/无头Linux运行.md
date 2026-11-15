@@ -285,3 +285,19 @@ du -sh /var/cache/apt /var/lib/apt/lists
 * **要一个真正隔离、可整体备份/迁移的环境** → VirtualBox + Ubuntu Server，**3.4GB / 2GB 内存**；
 * **C: 只剩 20GB 且不想装 VirtualBox** → WSL2，**2.3GB**，代价是开 Hyper-V 并重启一次；
 * Windows 虚拟机可以直接排除：**22GB 起步**，是 Linux 方案的 6 倍。
+
+## 收信：交给 SnowLuma（2026-11-15 实测可行）
+
+这个文档前面写的「收信 hook 在 Linux 上撞墙」到 3.2.28 依然成立：LD_PRELOAD 进 QQ 会
+`int3` 自毁（Chromium 对 pre-main 存在的 socket/线程一律 CHECK），远程 dlopen 也不稳定。
+**换一条路就通了**：SnowLuma 用同一门技术、把注入放在运行期，装在同一个 VM 里能正常
+`[Hook] login detected`，`trpc.msg.olpush.OlPushService.MsgPush` 逐条解出来。
+
+- 装法：`tools/snowluma/` 下一个脚本（Node 24.22.1 + v2.4.2 linux-x64-lite，
+  `hookAutoLoad: true`，systemd 单元，OneBot 监听从 127.0.0.1 改 0.0.0.0）；
+- 宿主侧 NAT：guest 3000/3001 → host **3102/3101**（3100 是 qq-bridge 控制台，别抢）；
+- 分工：ArkLink 继续负责「发文字」（x11，最不容易被风控摸到），SnowLuma 负责收信
+  和语音/引用/图片这些富消息。dsh-arkhub 0.5.0 的门面把两者合起来，先走 SnowLuma、
+  失败退回 ArkLink；
+- 坑：第一次跑崩过会留半建成的 data 目录，迁移不幂等（`duplicate column name: media_data`），
+  清 `data/` 重来即可。
