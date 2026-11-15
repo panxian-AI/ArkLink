@@ -24,7 +24,8 @@ VBoxManage controlvm arklink natpf1 "vnc,tcp,127.0.0.1,5903,,5900"
 任意 VNC 客户端（TightVNC Viewer、RealVNC Viewer 都行；Windows 自带的远程桌面不行）：
 
 - 地址：`127.0.0.1:5903`（只在本机回环上，不出网）
-- 密码：装的时候打印过；忘了就在 VM 里 `sudo x11vnc -storepasswd 新密码 /home/arklink/.vncpass` 重设
+- 密码：装的时候打印过；忘了就在 VM 里看 `/etc/x11vnc-pass.env`（root 可读），
+  改完 `sudo systemctl restart x11vnc` 生效
 
 连上之后看到的就是 :99 的桌面。QQ 掉了/卡在哪个界面，直接点。
 

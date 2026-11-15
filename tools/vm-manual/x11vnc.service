@@ -3,7 +3,10 @@ Description=x11vnc manual takeover for QQ (display :99)
 After=multi-user.target
 
 [Service]
-ExecStart=/usr/bin/x11vnc -display :99 -rfbauth /home/arklink/.vncpass -rfbport 5900 -forever -shared -noxdamage -repeat -quiet
+# 密码在 /etc/x11vnc-pass.env（仅 root 可读，形如 X11VNC_PASS=xxxxxxxx）。
+# 不用 -rfbauth + -storepasswd：实测 storepasswd 写出的文件配 -rfbauth 认不了。
+EnvironmentFile=/etc/x11vnc-pass.env
+ExecStart=/bin/sh -c 'exec /usr/bin/x11vnc -display :99 -passwd $X11VNC_PASS -rfbport 5900 -forever -shared -noxdamage -repeat -quiet'
 Restart=always
 RestartSec=5
 User=root

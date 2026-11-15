@@ -309,6 +309,8 @@ watchdog 只认它收录过的窗口形状（快捷登录、二维码、更新�
 `tools/vm-manual/install.sh` 装 x11vnc（绑 :99，systemd 自启），宿主 NAT 转发
 `vnc,tcp,127.0.0.1,5903,,5900`，VNC 客户端连 `127.0.0.1:5903`。
 
-- 密码在 VM 的 `/home/arklink/.vncpass`（装的时候打印过一次）；
+- 密码在 VM 的 `/etc/x11vnc-pass.env`（root 可读，`X11VNC_PASS=…`；装的时候打印过一次）。
+  坑：别用 `-rfbauth` + `-storepasswd` —— 实测 storepasswd 写出的文件配 -rfbauth
+  认不了（密码对也 rejected），所以 unit 用 `-passwd` 从环境文件注入；
 - 只在本机回环暴露，不出网；
 - 平时零开销，就多一个监听口；watchdog 顶不住的任何界面都能人工兜底。
