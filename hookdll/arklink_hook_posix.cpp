@@ -255,7 +255,16 @@ void* recv_thread(void*) {
 }
 
 void start_once() {
-    g_runtime_dir = runtime_dir();
+    // 注意：这里必须先落到命名局部变量再赋给全局。在某些环境（VirtualBox
+    // 里的 Debian 12 实测）直接 `g_runtime_dir = runtime_dir()` 的内联
+    // memmove 序列会让加载进程 SIGSEGV——LD_PRELOAD 进 sleep 都崩，
+    // ptrace/gdb 远程 dlopen 也在同一处吃信号，表现成「hook 一进 QQ 就崩」。
+    // 经局部变量赋值后同一环境稳定通过，socket/线程全部正常。
+    {
+        const char* xdg = getenv("XDG_RUNTIME_DIR");
+        std::string dir(xdg && *xdg ? xdg : "/tmp");
+        g_runtime_dir = dir;
+    }
     std::string pid = std::to_string(getpid());
     g_control_fd.store(make_listener("arklink." + pid + ".control"));
     g_recv_fd.store(make_listener("arklink." + pid + ".recv"));

@@ -89,6 +89,33 @@ apt update && apt install -y \
   # Ubuntu 24.04 上把 libasound2 换成 libasound2t64（t64 改名），别两个都写
 
 # 2) QQ Linux 版（NT 架构）。版本号会变，去 im.qq.com/linuxqq 或
+
+### 版本钉死（自愈）
+
+QQ 官方 CDN 只保留最新版，旧版直链全部 404（3.2.7 已全网无源）。
+setup_guest.sh 支持 `--qq-pin 版本号 --qq-pin-url deb地址`：写入
+`/opt/arklink/qq.target` / `qq.deb.url` 后，`arklink-qq-version.timer`
+每 10 分钟核对 dpkg 里的版本，不一致（QQ 自动升级 / 误装新版）就自动
+下载目标 deb 重装——监督循环拉起新 QQ 并自动点登录，全程无人工。
+
+可下载的旧版归档：QQ 3.2.28 见
+<https://github.com/panxian-AI/ArkLink/releases/tag/qq-3.2.28>
+（更早版本各镜像也没有）。注意钉旧版与否**不影响收信**：见下。
+
+### 收信 hook 在 Linux 上的现状（2026-11 实测）
+
+* hook so 的 `start_once` 曾有一处会在加载进程里 SIGSEGV 的写法
+  （`g_runtime_dir = runtime_dir()` 的内联 memmove 序列，LD_PRELOAD 进
+  sleep 都崩）——已修（改经命名局部变量赋值）。
+* 修完后：sleep 正常、socket/线程全部建出来；但 **QQ（Chromium）依然
+  拒绝**——pre-main 阶段存在任何 socket/线程都会让它 int3 自毁
+  （延迟到 30 秒后再初始化也一样，空构造也一样；mini 无活动 so 则没事）。
+* ptrace/gdb 远程调用 dlopen：gdb 能把模块映进去、构造函数能进来，
+  但调用中途在 memmove 里吃信号；0.13.0 自带注入器返回值乱码、构造函数
+  不执行。两条路在本环境都不可靠。
+* 结论：**Linux 收信在 hook 路线上暂时无解**（QQ 版本无关），发送走
+  x11 引擎不受影响。等上游实现真正的消息分发 hook 或换 Windows。
+
 #    github.com/Rodert/qq-versions/releases 取当前直链
 wget -O /tmp/qq.deb https://qqdl.gtimg.cn/qqfile/QQNT/9.9.33/release/3f89efc5/QQ_3.2.32_260812_amd64_01.deb
 apt install -y /tmp/qq.deb || (apt install -f -y && dpkg -i /tmp/qq.deb)

@@ -8,11 +8,17 @@
 #   curl -fsSL https://raw.githubusercontent.com/panxian-AI/ArkLink/main/tools/setup_guest.sh | bash
 # 或：
 #   bash tools/setup_guest.sh --qq-deb /tmp/QQ_3.2.32_260812_amd64_01.deb
+# 钉死 QQ 版本（之后 QQ 自动升级会被定时器自动退回；官方 CDN 会清旧版，
+# 旧 deb 建议先归档进自己的 GitHub Release，如 panxian-AI/ArkLink 的 qq-3.2.28）：
+#   bash tools/setup_guest.sh --qq-pin 3.2.28-48517 \
+#        --qq-pin-url https://github.com/panxian-AI/ArkLink/releases/download/qq-3.2.28/QQ_3.2.28_260429_amd64_01.deb
 #
 # 支持：Ubuntu 22.04 / 24.04、Debian 12。其它发行版会提示手动步骤后退出。
 set -euo pipefail
 
 QQ_DEB=""
+QQ_PIN=""
+QQ_PIN_URL=""
 DISPLAY_NUM=99
 GEOMETRY="1280x800x24"
 ARKLINK_SRC=""
@@ -20,6 +26,8 @@ ARKLINK_SRC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --qq-deb)   QQ_DEB="$2"; shift 2 ;;
+    --qq-pin)   QQ_PIN="$2"; shift 2 ;;
+    --qq-pin-url) QQ_PIN_URL="$2"; shift 2 ;;
     --display)  DISPLAY_NUM="$2"; shift 2 ;;
     --geometry) GEOMETRY="$2"; shift 2 ;;
     --source)   ARKLINK_SRC="$2"; shift 2 ;;
@@ -92,6 +100,105 @@ elif command -v qq >/dev/null 2>&1 || [ -x /opt/QQ/qq ]; then
 else
   warn "未找到 QQ 安装包。请先从 https://im.qq.com/linuxqq/index.shtml 下载 deb，"
   warn "然后重跑：bash $0 --qq-deb /tmp/QQ_xxx_amd64.deb"
+fi
+
+
+# ---------------------------------------------------------------- 2.5 QQ 版本自愈
+# 官方 CDN 只留最新版（3.2.7 及以下已 404），旧 deb 请归档进自己的 GitHub
+# Release。钉了版本后，systemd 定时器每 10 分钟核对 dpkg 里的版本号，
+# 不一致（比如 QQ 自动升级、误装新版）就自动下载目标 deb 重装——监督循环
+# 会拉起新 QQ 并自动点登录，全程无人工。见 ensure_qq_version.sh。
+log "安装 QQ 版本自愈 /opt/arklink/ensure_qq_version.sh + systemd 定时器"
+mkdir -p /opt/arklink
+cat > /opt/arklink/ensure_qq_version.sh <<'ENSURE'
+#!/bin/bash
+# QQ 版本自愈：dpkg 里装的 linuxqq 版本和目标版本不一致时，自动下载目标 deb
+# 并降级/重装，然后杀掉 QQ（监督循环会拉起新版并自动点登录）。
+#
+# 目标版本和下载地址由两个文件控制，setup_guest.sh 安装时写入：
+#   /opt/arklink/qq.target   目标 dpkg 版本号（如 3.2.28-51868）
+#   /opt/arklink/qq.deb.url  对应 deb 的下载 URL（官方 CDN 会清旧版，
+#                            旧版请用 GitHub 镜像，见 setup_guest.sh 注释）
+# 两个文件都缺 → 本脚本什么都不做（未钉版本 = 跟随最新）。
+#
+# 日志：/tmp/qqver.log（tail -5 排障）
+set -u
+
+TARGET_FILE=/opt/arklink/qq.target
+URL_FILE=/opt/arklink/qq.deb.url
+CACHE=/var/cache/arklink
+LOG=/tmp/qqver.log
+
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG"; }
+
+# 目标版本必须存在且非空
+TARGET=$(cat "$TARGET_FILE" 2>/dev/null | tr -d '[:space:]')
+[ -n "$TARGET" ] || exit 0
+URL=$(cat "$URL_FILE" 2>/dev/null | tr -d '[:space:]')
+[ -n "$URL" ] || { log "钉了版本 $TARGET 但 qq.deb.url 为空，跳过"; exit 1; }
+
+CURRENT=$(dpkg-query -W -f='${Version}' linuxqq 2>/dev/null || echo '')
+[ -n "$CURRENT" ] || { log "linuxqq 未安装"; exit 1; }
+
+# dpkg 版本可能带修订号，按「目标串是当前串前缀」视为一致
+case "$CURRENT" in
+  "$TARGET"|"$TARGET"-*) exit 0 ;;
+esac
+
+log "版本不符：当前 $CURRENT，目标 $TARGET，开始重装"
+
+mkdir -p "$CACHE"
+DEB="$CACHE/qq-$TARGET.deb"
+if [ ! -s "$DEB" ]; then
+  log "下载 $URL"
+  curl -fSL --retry 3 -o "$DEB.tmp" "$URL" || { log "下载失败"; rm -f "$DEB.tmp"; exit 1; }
+  mv "$DEB.tmp" "$DEB"
+fi
+
+# 装之前核对 deb 里的版本，防止 URL 指错包
+DEB_VER=$(dpkg-deb -f "$DEB" Version 2>/dev/null || echo '')
+case "$DEB_VER" in
+  "$TARGET"|"$TARGET"-*) ;;
+  *) log "deb 版本 $DEB_VER 与目标 $TARGET 不符，删除缓存"; rm -f "$DEB"; exit 1 ;;
+esac
+
+pkill -x qq 2>/dev/null
+pkill -f /opt/QQ/qq 2>/dev/null
+sleep 1
+if dpkg -i "$DEB" >> "$LOG" 2>&1; then
+  log "已重装为 $(dpkg-query -W -f='${Version}' linuxqq 2>/dev/null)，等监督循环拉起"
+else
+  log "dpkg -i 失败（可能是依赖问题，apt --fix-broken install 需人工）"
+  exit 1
+fi
+ENSURE
+chmod 755 /opt/arklink/ensure_qq_version.sh
+cat > /etc/systemd/system/arklink-qq-version.service <<'QVUNIT'
+[Unit]
+Description=ArkLink QQ 版本自愈（钉版本：不符即自动重装）
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/arklink/ensure_qq_version.sh
+QVUNIT
+cat > /etc/systemd/system/arklink-qq-version.timer <<'QVTIMER'
+[Unit]
+Description=ArkLink QQ 版本自愈定时器
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+QVTIMER
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable --now arklink-qq-version.timer >/dev/null 2>&1 || true
+if [ -n "$QQ_PIN" ]; then
+  log "钉 QQ 版本：$QQ_PIN"
+  echo "$QQ_PIN" > /opt/arklink/qq.target
+  echo "${QQ_PIN_URL:-https://github.com/panxian-AI/ArkLink/releases/download/qq-3.2.28/QQ_3.2.28_260429_amd64_01.deb}" > /opt/arklink/qq.deb.url
 fi
 
 # ---------------------------------------------------------------- 3. Arklink
@@ -386,6 +493,9 @@ heal() {
     LOG=/var/log/qq.log
     [ -w "\$LOG" ] || LOG=/var/log/qq-\$(id -u).log
     if [ -x "\$QQ_BIN" ]; then
+      # 收信 hook 的 LD_PRELOAD 试验（2026-11-15）：QQ 3.2.28 会 int3 自毁
+      # （Chromium 子进程 CHECK），空构造也一样；so 本身的 ctor 在 sleep 上没问题。
+      # 延迟初始化见 libarkhook-delayed.so 实验。默认不启用。
       if [ "\$(id -u)" = "0" ] && id "\$QQ_USER" >/dev/null 2>&1; then
         runuser -u "\$QQ_USER" -- setsid "\$QQ_BIN" --no-sandbox >"\$LOG" 2>&1 &
       else
