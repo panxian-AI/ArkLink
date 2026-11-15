@@ -12,3 +12,5 @@
 # systemd 单元和 shell 脚本进 Linux 必须保持 LF（CRLF 会让 unit 解析失败）
 tools/snowluma/*.sh text eol=lf
 tools/snowluma/*.service text eol=lf
+tools/vm-manual/*.sh text eol=lf
+tools/vm-manual/*.service text eol=lf

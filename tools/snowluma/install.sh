@@ -108,5 +108,10 @@ console.log(`
 宿主机（Windows）上补 NAT 转发：
   VBoxManage controlvm arklink natpf1 "snowluma-http,tcp,127.0.0.1,3102,,${http.port ?? 3000}"
   VBoxManage controlvm arklink natpf1 "snowluma-ws,tcp,127.0.0.1,3101,,${ws.port ?? 3001}"
+  VBoxManage controlvm arklink natpf1 "vnc,tcp,127.0.0.1,5903,,5900"
+
+人工操作口（VNC 手动接管，watchdog 没收录的弹窗都靠它）：
+  VM 里跑 tools/vm-manual/install.sh，装 x11vnc（密码文件 /home/arklink/.vncpass）；
+  宿主用任意 VNC 客户端连 127.0.0.1:5903，密码问装环境的人或在 ~/.arklink/env.json 里。
 `);
 ' "$CONF"

@@ -301,3 +301,14 @@ du -sh /var/cache/apt /var/lib/apt/lists
   失败退回 ArkLink；
 - 坑：第一次跑崩过会留半建成的 data 目录，迁移不幂等（`duplicate column name: media_data`），
   清 `data/` 重来即可。
+
+## 人工操作口：VNC 手动接管（2026-11-15 加入）
+
+watchdog 只认它收录过的窗口形状（快捷登录、二维码、更新弹窗、掉线提示）。凡是没
+收录的界面 —— 新版验证页、设备锁、风控提示 —— 就得让人能亲手点。做法：VM 里跑
+`tools/vm-manual/install.sh` 装 x11vnc（绑 :99，systemd 自启），宿主 NAT 转发
+`vnc,tcp,127.0.0.1,5903,,5900`，VNC 客户端连 `127.0.0.1:5903`。
+
+- 密码在 VM 的 `/home/arklink/.vncpass`（装的时候打印过一次）；
+- 只在本机回环暴露，不出网；
+- 平时零开销，就多一个监听口；watchdog 顶不住的任何界面都能人工兜底。
