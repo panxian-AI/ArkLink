@@ -9,3 +9,6 @@
 
 # .bat 用 CRLF：某些 cmd.exe 版本对纯 LF 的批处理会漏执行最后一行
 *.bat text eol=crlf
+# systemd 单元和 shell 脚本进 Linux 必须保持 LF（CRLF 会让 unit 解析失败）
+tools/snowluma/*.sh text eol=lf
+tools/snowluma/*.service text eol=lf
