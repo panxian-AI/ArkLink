@@ -157,9 +157,13 @@ python -m arklink serve onebot --type ntqq-hook --port 6700 --token t
 
 `serve onebot` 是一个标准库写的 **OneBot 11 服务端**（正向 WS + HTTP API + HTTP 上报同端口，
 四个 WS 路径都认），所以 NoneBot2 / Koishi / 自研脚本只改地址、不改代码。
-AstrBot 是例外：它的 `aiocqhttp` 只做**反向 WS 服务端**，不能直连本服务端，
-要让 [ArkBot](https://github.com/panxian-AI/ArkBot) 的兼容层站在中间
-（ArkBot `reverse_urls = ["astrbot://127.0.0.1:6199"]`）。
+AstrBot 是例外：它的 `aiocqhttp` 只做**反向 WS 服务端**，不能直连本服务端。接法两条：
+
+- 只要 AstrBot：[ArkBridge](https://github.com/panxian-AI/ArkBridge) —— 零依赖纯中继，
+  `python -m arkbridge run` 一条命令，不装 ArkBot
+- 还要用 ArkBot 的插件 / 发件箱：[ArkBot](https://github.com/panxian-AI/ArkBot) 的兼容层
+  （`reverse_urls = ["astrbot://127.0.0.1:6199"]`）
+
 细节见 [docs/一键替换NapCat.md](docs/一键替换NapCat.md)。
 
 ### 注入通道：自己登 QQ → 检测进程 → 注入 → 收推送
