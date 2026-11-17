@@ -28,7 +28,8 @@ http://127.0.0.1:6700/
 |------|------|------|
 | NoneBot2（反向 WS） | `ws://127.0.0.1:3001/onebot/v11/ws` | 把主机端口改成 ArkLink 的 |
 | NoneBot2（正向 WS） | 连 NapCat 的 `ws://127.0.0.1:3001` | 连 `ws://127.0.0.1:6700/onebot/v11/ws` |
-| Koishi / AstrBot | OneBot 适配器 + 地址 | 同上，只改地址 |
+| Koishi | OneBot 适配器 + 地址 | 同上，只改地址 |
+| AstrBot | — | **不能直连**：它只做反向 WS 服务端，要经 [ArkBot](https://github.com/panxian-AI/ArkBot) 兼容层中转（见「从其他框架迁移」） |
 | 自研脚本 | HTTP `POST /send_group_msg` | 同路径同参数，只改 base_url |
 
 路径 `/`、`/onebot/v11/ws`、`/api/ws`、`/ws` **四个都认**，因为不同框架默认值不一样。
